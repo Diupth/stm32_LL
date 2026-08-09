@@ -23,9 +23,9 @@ add_compile_definitions(
 set(SOURCES
     # Core sources
     Core/Src/main.c
-    Core/Src/system_stm32h5xx.c
-    Core/Src/startup_stm32h562xx.s
-    Core/Src/usb_descriptors.c
+    Core/Startup/system_stm32h5xx.c
+    Core/Startup/startup_stm32h562xx.s
+    Core/Src/ComMgr.c
 
     # ST HAL Driver sources needed for USB and minimal GPIO/RCC
     Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal.c

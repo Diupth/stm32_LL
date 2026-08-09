@@ -1,5 +1,5 @@
 #include "stm32h5xx.h"
-#include "tusb.h"
+#include "ComMgr.h"
 
 // Biến toàn cục để theo dõi thời gian và trạng thái LED
 static uint32_t last_toggle_tick = 0;
@@ -8,22 +8,12 @@ static uint8_t led_state = 0;
 void SystemClock_Config(void);
 void Error_Handler(void);
 
-// Định nghĩa hàm trễ sử dụng SysTick
-void delay_ms(uint32_t ms)
-{
-    uint32_t start = HAL_GetTick();
-    while ((HAL_GetTick() - start) < ms)
-    {
-        tud_task(); // Chạy nền TinyUSB trong lúc đợi trễ
-    }
-}
-
 int main(void)
 {
     // 1. Reset toàn bộ ngoại vi và khởi tạo Flash, SysTick
     HAL_Init();
 
-    // 2. Cấu hình xung nhịp hệ thống (Bật HSI48 cho USB và đồng bộ bằng CRS)
+    // 2. Cấu hình xung nhịp hệ thống (SYSCLK 250MHz, kích hoạt HSI48 & CRS cho USB)
     SystemClock_Config();
 
     // 3. Khởi tạo GPIO cho chân LED (PB2)
@@ -38,47 +28,15 @@ int main(void)
     // Tắt LED ban đầu
     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2, GPIO_PIN_RESET);
 
-    // 4. Khởi tạo thủ công phần cứng mức thấp cho USB (Do TinyUSB chạy trực tiếp bằng thanh ghi, không gọi MspInit)
-    
-    // a. Chọn nguồn xung nhịp HSI48 cho USB
-    RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
-    PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_USB;
-    PeriphClkInitStruct.UsbClockSelection = RCC_USBCLKSOURCE_HSI48;
-    if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
-    {
-        Error_Handler();
-    }
-
-    // b. Kích hoạt clock cổng GPIOA (PA11 và PA12 là hai chân DM và DP của USB)
-    __HAL_RCC_GPIOA_CLK_ENABLE();
-
-    // c. Cấu hình chân PA11 và PA12 cho USB (AF10)
-    GPIO_InitStruct.Pin = GPIO_PIN_11 | GPIO_PIN_12;
-    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-    GPIO_InitStruct.Alternate = GPIO_AF10_USB;
-    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-    // d. Bật nguồn VDDUSB (Cần thiết cho cổng USB của dòng H5 hoạt động)
-    HAL_PWREx_EnableVddUSB();
-
-    // e. Bật clock ngoại vi USB
-    __HAL_RCC_USB_CLK_ENABLE();
-
-    // f. Cấu hình độ ưu tiên ngắt và kích hoạt ngắt USB
-    HAL_NVIC_SetPriority(USB_DRD_FS_IRQn, 6, 0);
-    HAL_NVIC_EnableIRQ(USB_DRD_FS_IRQn);
-
-    // 5. Khởi tạo USB Stack (TinyUSB)
-    tusb_init();
+    // 4. Khởi tạo bộ quản lý giao tiếp (USB & TinyUSB)
+    ComMgr_Init();
 
     last_toggle_tick = HAL_GetTick();
 
     while (1)
     {
-        // Chạy tác vụ nền của TinyUSB
-        tud_task();
+        // Xử lý các tác vụ nền của cổng COM
+        ComMgr_Process();
 
         // Kiểm tra xem đã qua 500ms chưa để chớp tắt LED và gửi trạng thái
         if (HAL_GetTick() - last_toggle_tick >= 500)
@@ -89,19 +47,8 @@ int main(void)
             // Toggle LED vật lý
             HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2, led_state ? GPIO_PIN_SET : GPIO_PIN_RESET);
 
-            // Gửi dữ liệu trạng thái LED qua cổng USB Virtual COM (CDC)
-            if (tud_cdc_connected())
-            {
-                if (led_state)
-                {
-                    tud_cdc_write_str("LED State: ON\r\n");
-                }
-                else
-                {
-                    tud_cdc_write_str("LED State: OFF\r\n");
-                }
-                tud_cdc_write_flush(); // Đẩy dữ liệu đi ngay lập tức
-            }
+            // Gửi trạng thái LED qua cổng USB Virtual COM
+            ComMgr_SendLEDState(led_state);
         }
     }
 }
@@ -163,12 +110,6 @@ void SystemClock_Config(void)
     RCC_CRSInitStruct.ErrorLimitValue = 34;
     RCC_CRSInitStruct.HSI48CalibrationValue = 32;
     HAL_RCCEx_CRSConfig(&RCC_CRSInitStruct);
-}
-
-// Hàm xử lý ngắt USB (Gọi thư viện TinyUSB xử lý các sự kiện USB)
-void USB_DRD_FS_IRQHandler(void)
-{
-    tud_int_handler(0);
 }
 
 // Ngắt SysTick dùng để tăng biến đếm thời gian hệ thống của HAL (uwTick)
