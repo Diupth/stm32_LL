@@ -1,0 +1,32 @@
+# Thư mục build và các file đầu ra
+build/
+.cache/
+
+# Các file thực thi và binary
+*.elf
+*.bin
+*.hex
+*.map
+
+# Editor/IDE settings
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+.DS_Store
+
+# CMake temporary files
+CMakeCache.txt
+CMakeFiles/
+CMakePresets.json
+cmake_install.cmake
+Makefile
+ninja
+.ninja_deps
+.ninja_log
+
+# Toolchain paths or local scripts caches
+compile_commands.json
