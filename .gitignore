@@ -9,7 +9,6 @@ build/
 *.map
 
 # Editor/IDE settings
-.vscode/
 .idea/
 *.suo
 *.ntvs*

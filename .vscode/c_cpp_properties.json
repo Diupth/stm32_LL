@@ -1,0 +1,28 @@
+{
+    "configurations": [
+        {
+            "name": "STM32",
+            "includePath": [
+                "${workspaceFolder}/Inc",
+                "${workspaceFolder}/Src/Apps",
+                "${workspaceFolder}/Src/Services",
+                "${workspaceFolder}/Src/Drivers/CMSIS/Include",
+                "${workspaceFolder}/Src/Drivers/CMSIS/Device/ST/STM32H5xx/Include",
+                "${workspaceFolder}/Src/Drivers/STM32H5xx_HAL_Driver/Inc",
+                "${workspaceFolder}/Src/Drivers/STM32H5xx_HAL_Driver/Inc/Legacy",
+                "${workspaceFolder}/Src/Drivers/tinyusb/src"
+            ],
+            "defines": [
+                "STM32H562xx",
+                "USE_HAL_DRIVER",
+                "CFG_TUSB_MCU=OPT_MCU_STM32H5"
+            ],
+            "compileCommands": "${workspaceFolder}/build/compile_commands.json",
+            "intelliSenseMode": "gcc-arm",
+            "forcedInclude": [
+                "${workspaceFolder}/Inc/stm32h5xx_hal_conf.h"
+            ]
+        }
+    ],
+    "version": 4
+}

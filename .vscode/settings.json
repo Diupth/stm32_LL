@@ -1,0 +1,14 @@
+{
+    "stm32cube-ide-build-cmake.ignoreCubeProjectDiscovery": true,
+    "stm32cube-ide-build-cmake.intellisense.enableAutomaticConfiguration": false,
+    "C_Cpp.default.configurationProvider": "",
+    "C_Cpp.intelliSenseEngine": "default",
+    "cmake.cmakePath": "cmake",
+    "cmake.configureArgs": [
+        "-DCMAKE_TOOLCHAIN_FILE=${workspaceFolder}/arm-none-eabi-gcc.cmake",
+        "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
+    ],
+    "cmake.preferredGenerators": [
+        "Ninja"
+    ]
+}
