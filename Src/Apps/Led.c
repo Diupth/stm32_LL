@@ -1,5 +1,6 @@
 #include "Led.h"
 #include "ComMgr.h"
+#include <string.h>
 
 static uint32_t last_toggle_tick;
 static uint8_t led_state;
@@ -29,5 +30,7 @@ void Led_Process(void)
     last_toggle_tick = HAL_GetTick();
     led_state = !led_state;
     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2, led_state ? GPIO_PIN_SET : GPIO_PIN_RESET);
-    ComMgr_SendLEDState(led_state);
+
+    char const *message = led_state ? "LED State: ON\r\n" : "LED State: OFF\r\n";
+    ComMgr_SendData(message, strlen(message));
 }

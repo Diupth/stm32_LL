@@ -50,18 +50,11 @@ void ComMgr_Process(void)
     tud_task();
 }
 
-void ComMgr_SendLEDState(uint8_t led_state)
+void ComMgr_SendData(void const *data, uint32_t length)
 {
-    if (tud_cdc_connected())
+  if (tud_cdc_connected() && data != NULL && length > 0U)
     {
-        if (led_state)
-        {
-            tud_cdc_write_str("LED State: ON\r\n");
-        }
-        else
-        {
-            tud_cdc_write_str("LED State: OFF\r\n");
-        }
+    tud_cdc_write(data, length);
         tud_cdc_write_flush();
     }
 }

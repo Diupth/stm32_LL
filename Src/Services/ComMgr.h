@@ -29,7 +29,7 @@ void ComMgr_Init(void);
 // Xử lý các tác vụ nền của TinyUSB (gọi trong main loop)
 void ComMgr_Process(void);
 
-// Gửi trạng thái của LED (ON/OFF) qua USB Virtual COM
-void ComMgr_SendLEDState(uint8_t led_state);
+// Gửi dữ liệu qua USB Virtual COM
+void ComMgr_SendData(void const *data, uint32_t length);
 
 #endif /* __COMMGR_H */
