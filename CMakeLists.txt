@@ -21,46 +21,52 @@ add_compile_definitions(
 
 # Source files
 set(SOURCES
-    # Core sources
-    Core/Src/main.c
-    Core/Startup/system_stm32h5xx.c
-    Core/Startup/startup_stm32h562xx.s
-    Core/Src/ComMgr.c
+    # Application & System sources
+    Src/main.c
+    Src/Apps/Led.c
+    Startup/system_stm32h5xx.c
+    Startup/startup_stm32h562xx.s
+
+    # Services
+    Src/Services/ComMgr.c
+    Src/Services/SystemClock.c
 
     # ST HAL Driver sources needed for USB and minimal GPIO/RCC
-    Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal.c
-    Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_cortex.c
-    Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_rcc.c
-    Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_rcc_ex.c
-    Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_gpio.c
-    Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_pcd.c
-    Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_pcd_ex.c
-    Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_ll_usb.c
-    Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_dma.c
-    Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_dma_ex.c
-    Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_pwr.c
-    Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_pwr_ex.c
-    Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_flash.c
-    Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_flash_ex.c
-    Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_exti.c
+    Src/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal.c
+    Src/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_cortex.c
+    Src/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_rcc.c
+    Src/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_rcc_ex.c
+    Src/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_gpio.c
+    Src/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_pcd.c
+    Src/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_pcd_ex.c
+    Src/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_ll_usb.c
+    Src/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_dma.c
+    Src/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_dma_ex.c
+    Src/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_pwr.c
+    Src/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_pwr_ex.c
+    Src/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_flash.c
+    Src/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_flash_ex.c
+    Src/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_exti.c
 
     # TinyUSB sources
-    Drivers/tinyusb/src/tusb.c
-    Drivers/tinyusb/src/common/tusb_fifo.c
-    Drivers/tinyusb/src/device/usbd.c
-    Drivers/tinyusb/src/class/cdc/cdc_device.c
-    Drivers/tinyusb/src/portable/st/stm32_fsdev/dcd_stm32_fsdev.c
-    Drivers/tinyusb/src/portable/st/stm32_fsdev/fsdev_common.c
+    Src/Drivers/tinyusb/src/tusb.c
+    Src/Drivers/tinyusb/src/common/tusb_fifo.c
+    Src/Drivers/tinyusb/src/device/usbd.c
+    Src/Drivers/tinyusb/src/class/cdc/cdc_device.c
+    Src/Drivers/tinyusb/src/portable/st/stm32_fsdev/dcd_stm32_fsdev.c
+    Src/Drivers/tinyusb/src/portable/st/stm32_fsdev/fsdev_common.c
 )
 
 # Include directories
 set(INC_DIRS
-    Core/Inc
-    Drivers/CMSIS/Include
-    Drivers/CMSIS/Device/ST/STM32H5xx/Include
-    Drivers/STM32H5xx_HAL_Driver/Inc
-    Drivers/STM32H5xx_HAL_Driver/Inc/Legacy
-    Drivers/tinyusb/src
+    Inc
+    Src/Apps
+    Src/Services
+    Src/Drivers/CMSIS/Include
+    Src/Drivers/CMSIS/Device/ST/STM32H5xx/Include
+    Src/Drivers/STM32H5xx_HAL_Driver/Inc
+    Src/Drivers/STM32H5xx_HAL_Driver/Inc/Legacy
+    Src/Drivers/tinyusb/src
 )
 
 # Target executable
