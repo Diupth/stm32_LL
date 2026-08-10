@@ -52,11 +52,35 @@ void ComMgr_Process(void)
 
 void ComMgr_SendData(void const *data, uint32_t length)
 {
-  if (tud_cdc_connected() && data != NULL && length > 0U)
+  if (!tud_cdc_connected() || data == NULL || length == 0U)
+  {
+    return;
+  }
+
+  uint8_t const *buffer = (uint8_t const *)data;
+  uint32_t offset = 0U;
+
+  while (offset < length)
+  {
+    uint32_t available = tud_cdc_write_available();
+
+    if (available == 0U)
     {
-    tud_cdc_write(data, length);
-        tud_cdc_write_flush();
+      tud_task();
+      continue;
     }
+
+    uint32_t chunk = length - offset;
+    if (chunk > available)
+    {
+      chunk = available;
+    }
+
+    tud_cdc_write(buffer + offset, chunk);
+    offset += chunk;
+  }
+
+  tud_cdc_write_flush();
 }
 
 // Hàm xử lý ngắt USB
