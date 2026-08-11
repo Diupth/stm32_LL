@@ -2,6 +2,7 @@
 #include "ComMgr.h"
 #include "SystemClock.h"
 #include "Led.h"
+#include "FakedReceiver.h"
 
 void Error_Handler(void);
 
@@ -11,10 +12,12 @@ int main(void)
     SystemClock_Config();
     Led_Init();
     ComMgr_Init();
+    FakedReceiver_Init();
 
     while (1)
     {
         ComMgr_Process();
+        FakedReceiver_Process();
         Led_Process();
     }
 }

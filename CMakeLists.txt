@@ -24,6 +24,7 @@ set(SOURCES
     # Application & System sources
     Src/main.c
     Src/Apps/Led.c
+    Src/Apps/FakedReceiver.c
     Startup/system_stm32h5xx.c
     Startup/startup_stm32h562xx.s
 
