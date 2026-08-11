@@ -4,6 +4,25 @@
 // Khai báo ngoài để dùng hàm Error_Handler từ main.c
 extern void Error_Handler(void);
 
+#define COMMGR_TX_QUEUE_SIZE 8192U // Dung lượng bộ đệm trung gian trước khi gửi qua USB.
+
+static uint8_t tx_queue[COMMGR_TX_QUEUE_SIZE]; // Lưu tạm dữ liệu chờ USB truyền.
+static uint32_t tx_queue_head;                 // Vị trí ghi dữ liệu mới vào queue.
+static uint32_t tx_queue_tail;                 // Vị trí đọc dữ liệu cũ để gửi đi.
+
+// Tính số byte hiện đang chờ trong queue.
+static uint32_t ComMgr_TxQueued(void)
+{
+  return (tx_queue_head - tx_queue_tail) % COMMGR_TX_QUEUE_SIZE;
+}
+
+// Tính số byte còn có thể ghi mà không làm mất dữ liệu đang chờ.
+// Chừa lại một ô trống để phân biệt queue đầy và queue rỗng.
+static uint32_t ComMgr_TxFree(void)
+{
+  return (COMMGR_TX_QUEUE_SIZE - 1U) - ComMgr_TxQueued();
+}
+
 // ====================================================================
 // Cấu hình Low-Level USB cho STM32H5
 // ====================================================================
@@ -47,40 +66,59 @@ void ComMgr_Init(void)
 
 void ComMgr_Process(void)
 {
+  // Xử lý sự kiện USB trước, ví dụ: nhận packet, hoàn tất truyền packet.
     tud_task();
+
+  // Chưa kết nối hoặc không có dữ liệu thì thoát ngay, không block main loop.
+    if (!tud_cdc_connected() || ComMgr_TxQueued() == 0U)
+    {
+        return;
+    }
+
+  // Chỉ lấy lượng dữ liệu mà FIFO của TinyUSB còn nhận được.
+    uint32_t available = tud_cdc_write_available();
+    uint32_t queued = ComMgr_TxQueued();
+    uint32_t length = queued < available ? queued : available;
+
+    if (length == 0U)
+    {
+        return;
+    }
+
+    // Queue vòng có thể bị chia thành hai đoạn ở cuối và đầu mảng.
+    // Lần này chỉ gửi đoạn liên tục từ vị trí tail đến cuối mảng.
+    uint32_t contiguous = COMMGR_TX_QUEUE_SIZE - tx_queue_tail;
+    if (length > contiguous)
+    {
+        length = contiguous;
+    }
+
+    // Gửi một phần nhỏ để main loop luôn có cơ hội chạy các tác vụ khác.
+    uint32_t written = tud_cdc_write(&tx_queue[tx_queue_tail], length);
+    tx_queue_tail = (tx_queue_tail + written) % COMMGR_TX_QUEUE_SIZE;
+
+    // Đưa dữ liệu từ FIFO TinyUSB ra USB ngay trong lần xử lý này.
+    tud_cdc_write_flush();
 }
 
 void ComMgr_SendData(void const *data, uint32_t length)
 {
-  if (!tud_cdc_connected() || data == NULL || length == 0U)
-  {
-    return;
-  }
-
-  uint8_t const *buffer = (uint8_t const *)data;
-  uint32_t offset = 0U;
-
-  while (offset < length)
-  {
-    uint32_t available = tud_cdc_write_available();
-
-    if (available == 0U)
+    // Hàm này không chờ USB; nếu dữ liệu chưa gửi được thì queue giữ lại.
+    if (data == NULL || length == 0U)
     {
-      tud_task();
-      continue;
+        return;
     }
 
-    uint32_t chunk = length - offset;
-    if (chunk > available)
+    // Khi queue đầy, chỉ nhận phần còn chỗ; phần dư sẽ bị bỏ qua để tránh block CPU.
+    uint32_t accepted = length < ComMgr_TxFree() ? length : ComMgr_TxFree();
+    uint8_t const *buffer = (uint8_t const *)data;
+
+    // Chép dữ liệu vào queue và tăng head theo kiểu vòng tròn.
+    for (uint32_t index = 0U; index < accepted; index++)
     {
-      chunk = available;
+        tx_queue[tx_queue_head] = buffer[index];
+        tx_queue_head = (tx_queue_head + 1U) % COMMGR_TX_QUEUE_SIZE;
     }
-
-    tud_cdc_write(buffer + offset, chunk);
-    offset += chunk;
-  }
-
-  tud_cdc_write_flush();
 }
 
 // Hàm xử lý ngắt USB
