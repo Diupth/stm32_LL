@@ -64,7 +64,7 @@ void ComMgr_Init(void)
     __HAL_RCC_USB_CLK_ENABLE();
 
     // 6. Cấu hình độ ưu tiên ngắt và kích hoạt ngắt USB
-    HAL_NVIC_SetPriority(USB_DRD_FS_IRQn, 6, 0);
+    HAL_NVIC_SetPriority(USB_DRD_FS_IRQn, 15, 0);
     HAL_NVIC_EnableIRQ(USB_DRD_FS_IRQn);
 
     // 7. Khởi tạo TinyUSB stack

@@ -89,7 +89,7 @@ void DACService_Init(const uint16_t *samples, uint32_t sample_count)
     GPDMA1_Channel1->CCR |= DMA_CCR_TCIE;
 
     // Cấu hình độ ưu tiên ngắt trong NVIC và cho phép ngắt GPDMA1 Channel 1 chạy
-    HAL_NVIC_SetPriority(GPDMA1_Channel1_IRQn, 5, 0);
+    HAL_NVIC_SetPriority(GPDMA1_Channel1_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(GPDMA1_Channel1_IRQn);
 
     // Bật kênh GPDMA1 Channel 1 bắt đầu chạy

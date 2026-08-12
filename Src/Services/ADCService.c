@@ -107,7 +107,7 @@ void ADCService_Init(void)
     GPDMA1_Channel0->CCR |= DMA_CCR_HTIE | DMA_CCR_TCIE;
 
     // Enable GPDMA1 Channel 0 Interrupt in NVIC
-    HAL_NVIC_SetPriority(GPDMA1_Channel0_IRQn, 4, 0);
+    HAL_NVIC_SetPriority(GPDMA1_Channel0_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(GPDMA1_Channel0_IRQn);
 
     // Enable GPDMA1 Channel 0
@@ -147,7 +147,7 @@ void ADCService_Init(void)
 
     // Enable ADC overrun interrupt
     ADC1->IER |= ADC_IER_OVRIE;
-    HAL_NVIC_SetPriority(ADC1_IRQn, 4, 0);
+    HAL_NVIC_SetPriority(ADC1_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(ADC1_IRQn);
 
     // Start ADC conversion
