@@ -31,5 +31,6 @@ void ComMgr_Process(void);
 
 // Gửi dữ liệu qua USB Virtual COM
 void ComMgr_SendData(void const *data, uint32_t length);
+void ComMgr_SendDebug(uint32_t counter);
 
 #endif /* __COMMGR_H */

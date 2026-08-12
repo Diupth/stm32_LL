@@ -23,14 +23,15 @@ add_compile_definitions(
 set(SOURCES
     # Application & System sources
     Src/main.c
-    Src/Apps/Led.c
-    Src/Apps/FakedReceiver.c
     Startup/system_stm32h5xx.c
     Startup/startup_stm32h562xx.s
 
     # Services
     Src/Services/ComMgr.c
     Src/Services/SystemClock.c
+    Src/Services/SyncSignal.c
+    Src/Services/ADCService.c
+    Src/Services/DACService.c
 
     # ST HAL Driver sources needed for USB and minimal GPIO/RCC
     Src/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal.c

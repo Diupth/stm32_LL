@@ -19,7 +19,7 @@ void SystemClock_Config(void)
     osc_config.PLL.PLLState = RCC_PLL_ON;
     osc_config.PLL.PLLSource = RCC_PLL1_SOURCE_CSI;
     osc_config.PLL.PLLM = 1;
-    osc_config.PLL.PLLN = 125;
+    osc_config.PLL.PLLN = 120;
     osc_config.PLL.PLLP = 2;
     osc_config.PLL.PLLQ = 2;
     osc_config.PLL.PLLR = 2;
