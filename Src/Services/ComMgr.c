@@ -3,6 +3,8 @@
 #include "ADCService.h"
 #include "DACService.h"
 #include "SyncSignal.h"
+#include "Transmitter.h"
+#include <string.h>
 
 // Khai báo ngoài để dùng hàm Error_Handler từ main.c
 extern void Error_Handler(void);
@@ -12,6 +14,8 @@ extern void Error_Handler(void);
 static uint8_t tx_queue[COMMGR_TX_QUEUE_SIZE]; // Lưu tạm dữ liệu chờ USB truyền.
 static uint32_t tx_queue_head;                 // Vị trí ghi dữ liệu mới vào queue.
 static uint32_t tx_queue_tail;                 // Vị trí đọc dữ liệu cũ để gửi đi.
+static char rx_command[32];
+static uint32_t rx_command_length;
 
 // Tính số byte hiện đang chờ trong queue.
 static uint32_t ComMgr_TxQueued(void)
@@ -106,6 +110,39 @@ void ComMgr_Process(void)
 
     // Đưa dữ liệu từ FIFO TinyUSB ra USB ngay trong lần xử lý này.
     tud_cdc_write_flush();
+}
+
+void tud_cdc_rx_cb(uint8_t itf)
+{
+  (void)itf;
+  char input[32];
+  uint32_t length = tud_cdc_read(input, sizeof(input));
+
+  for (uint32_t index = 0U; index < length; index++)
+  {
+    char character = input[index];
+    if (character == '\n' || character == '\r')
+    {
+      rx_command[rx_command_length] = '\0';
+      if (strcmp(rx_command, "cfg:barker13") == 0)
+      {
+        Transmitter_SetPulseType(TRANSMITTER_PULSE_BARKER13);
+      }
+      else if (strcmp(rx_command, "cfg:single") == 0)
+      {
+        Transmitter_SetPulseType(TRANSMITTER_PULSE_SINGLE);
+      }
+      rx_command_length = 0U;
+    }
+    else if (rx_command_length < sizeof(rx_command) - 1U)
+    {
+      rx_command[rx_command_length++] = character;
+    }
+    else
+    {
+      rx_command_length = 0U;
+    }
+  }
 }
 
 void ComMgr_SendData(void const *data, uint32_t length)
