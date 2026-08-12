@@ -1,9 +1,16 @@
 #include "ADCService.h"
 #include "stm32h5xx.h"
 
+// ADC acquisition service.
+// - PA0 is configured as analog input.
+// - ADC1 converts samples at a fixed trigger rate from TIM6 TRGO.
+// - GPDMA transfers converted values continuously into a circular double buffer.
+// - Each half of the buffer represents one complete frame of 2048 samples.
+
 #define ADC_HALF_BUFFER_SIZE 2048U
 #define ADC_DOUBLE_BUFFER_SIZE (ADC_HALF_BUFFER_SIZE * 2U)
 
+// Double buffer: 2 x 2048 samples, used as a ping-pong circular DMA target.
 __attribute__((aligned(32))) static uint16_t adc_double_buffer[ADC_DOUBLE_BUFFER_SIZE];
 
 static volatile uint32_t adc_completed_count = 0;
@@ -11,13 +18,11 @@ static volatile uint32_t adc_overrun_count = 0;
 static volatile uint32_t adc_dma_error_count = 0;
 static volatile uint32_t adc_restart_count = 0;
 
-static volatile uint32_t last_minimum = 0xFFFFU;
-static volatile uint32_t last_maximum = 0U;
-
+// Indicates if a half-buffer just finished and can be consumed by the application.
 static volatile bool new_frame_ready = false;
 static volatile uint32_t active_buffer_offset = 0;
 
-// GPDMA Node structure (4 words for fast reload)
+// Minimal LLI node used by GPDMA to reload the channel in circular mode.
 typedef struct {
     uint32_t CBR1;
     uint32_t CSAR;
@@ -29,11 +34,11 @@ __attribute__((aligned(32))) static GPDMA_NodeTypeDef adc_dma_node;
 
 void ADCService_Init(void)
 {
-    // 1. Enable GPIOA, ADC, and GPDMA1 Clocks
+    // 1. Enable GPIOA, ADC, and GPDMA1 clocks.
     RCC->AHB2ENR |= RCC_AHB2ENR_GPIOAEN;
     RCC->AHB2ENR |= RCC_AHB2ENR_ADCEN;
     RCC->AHB1ENR |= RCC_AHB1ENR_GPDMA1EN;
-    (void)RCC->AHB1ENR; // Read back to ensure clock is active
+    (void)RCC->AHB1ENR; // Read-back ensures the peripheral clock is active.
 
     // Set ADC common clock mode to Synchronous HCLK / 4 (60 MHz)
     ADC12_COMMON->CCR &= ~ADC_CCR_CKMODE_Msk;
@@ -147,12 +152,12 @@ uint32_t ADCService_GetRestartCount(void)
 
 uint32_t ADCService_GetLastMinimum(void)
 {
-    return last_minimum;
+    return 0U;
 }
 
 uint32_t ADCService_GetLastMaximum(void)
 {
-    return last_maximum;
+    return 0U;
 }
 
 bool ADCService_ReadFrame(int16_t *dest)
@@ -163,24 +168,11 @@ bool ADCService_ReadFrame(int16_t *dest)
     }
 
     uint32_t offset = active_buffer_offset;
-    uint32_t min_val = 0xFFFFU;
-    uint32_t max_val = 0U;
 
     for (uint32_t i = 0U; i < ADC_HALF_BUFFER_SIZE; i++)
     {
-        uint16_t raw_sample = adc_double_buffer[offset + i];
-        
-        // SonarViewer expects signed 16-bit integers
-        // Scale/convert 12-bit ADC value (0-4095) to match Q15 / format.
-        // Let's center it by subtracting 2048 and then scaling up to signed 16-bit range.
-        dest[i] = (int16_t)raw_sample;
-
-        if (raw_sample < min_val) min_val = raw_sample;
-        if (raw_sample > max_val) max_val = raw_sample;
+        dest[i] = (int16_t)adc_double_buffer[offset + i];
     }
-
-    last_minimum = min_val;
-    last_maximum = max_val;
     new_frame_ready = false;
 
     return true;
@@ -190,9 +182,11 @@ void GPDMA1_Channel0_IRQHandler(void)
 {
     uint32_t csr = GPDMA1_Channel0->CSR;
 
+    // DMA raises HTF when the first half-buffer is filled and TCF when the second half is filled.
+    // This allows the application to read a stable 2048-sample frame without stopping the ADC.
     if (csr & DMA_CSR_HTF)
     {
-        // Clear Half Transfer flag
+        // Clear half-transfer flag.
         GPDMA1_Channel0->CFCR |= DMA_CFCR_HTF;
 
         active_buffer_offset = 0U;
@@ -202,7 +196,7 @@ void GPDMA1_Channel0_IRQHandler(void)
     
     if (csr & DMA_CSR_TCF)
     {
-        // Clear Transfer Complete flag
+        // Clear full-transfer flag.
         GPDMA1_Channel0->CFCR |= DMA_CFCR_TCF;
 
         active_buffer_offset = ADC_HALF_BUFFER_SIZE;
@@ -210,6 +204,7 @@ void GPDMA1_Channel0_IRQHandler(void)
         adc_completed_count++;
     }
 
+    // DMA error flags: data transfer error, unaligned/unsupported access, etc.
     if (csr & (DMA_CSR_DTEF | DMA_CSR_ULEF | DMA_CSR_USEF))
     {
         GPDMA1_Channel0->CFCR |= (DMA_CFCR_DTEF | DMA_CFCR_ULEF | DMA_CFCR_USEF);
@@ -219,9 +214,11 @@ void GPDMA1_Channel0_IRQHandler(void)
 
 void ADC1_IRQHandler(void)
 {
+    // Overrun occurs when a new ADC conversion finishes before the previous data is read.
+    // In circular DMA mode, this usually means the software is not draining the buffer quickly enough.
     if (ADC1->ISR & ADC_ISR_OVR)
     {
-        // Clear overrun flag
+        // Clear overrun flag.
         ADC1->ISR |= ADC_ISR_OVR;
         adc_overrun_count++;
     }

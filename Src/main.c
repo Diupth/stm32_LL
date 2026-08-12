@@ -75,8 +75,8 @@ int main(void)
 
             ComMgr_SendData(log_frame, sizeof(log_frame));
 
-            // Send DBG1 debug frame (164 bytes)
-            ComMgr_SendDebug(log_sequence);
+            // Send DBG1 debug frame (164 bytes) - Commented to remove unnecessary logs
+            // ComMgr_SendDebug(log_sequence);
 
             log_sequence++;
         }

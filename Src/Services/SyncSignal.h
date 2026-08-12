@@ -4,8 +4,15 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+// Common timing source used to synchronize ADC and DAC conversions.
+// Timer 6 emits a periodic TRGO event at 160 kHz to drive the sample clock.
+
 void SyncSignal_Init(void);
+
+// Returns the current countdown value of Timer 6.
 uint32_t SyncSignal_GetTimerCounter(void);
+
+// Returns true if the sync timer is currently enabled and running.
 bool SyncSignal_IsTimerEnabled(void);
 
 #endif /* SYNCSIGNAL_H */

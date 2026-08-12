@@ -62,7 +62,6 @@ set(SOURCES
 # Include directories
 set(INC_DIRS
     Inc
-    Src/Apps
     Src/Services
     Src/Drivers/CMSIS/Include
     Src/Drivers/CMSIS/Device/ST/STM32H5xx/Include
