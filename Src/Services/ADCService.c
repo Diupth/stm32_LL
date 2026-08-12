@@ -21,6 +21,27 @@ static volatile uint32_t adc_restart_count = 0;
 // Indicates if a half-buffer just finished and can be consumed by the application.
 static volatile bool new_frame_ready = false;
 static volatile uint32_t active_buffer_offset = 0;
+#ifdef SHOW_SAMPLING_LOG
+static volatile uint32_t adc_last_timestamp = 0;
+static volatile uint32_t adc_frame_period_us = 0;
+
+static void ADCService_EnableCycleCounter(void)
+{
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CYCCNT = 0U;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+}
+
+static void ADCService_RecordFrameTimestamp(void)
+{
+    uint32_t timestamp = DWT->CYCCNT;
+    if (adc_last_timestamp != 0U)
+    {
+        adc_frame_period_us = (timestamp - adc_last_timestamp) / (SystemCoreClock / 1000000U);
+    }
+    adc_last_timestamp = timestamp;
+}
+#endif
 
 // Minimal LLI node used by GPDMA to reload the channel in circular mode.
 typedef struct {
@@ -34,6 +55,9 @@ __attribute__((aligned(32))) static GPDMA_NodeTypeDef adc_dma_node;
 
 void ADCService_Init(void)
 {
+#ifdef SHOW_SAMPLING_LOG
+    ADCService_EnableCycleCounter();
+#endif
     // 1. Enable GPIOA, ADC, and GPDMA1 clocks.
     RCC->AHB2ENR |= RCC_AHB2ENR_GPIOAEN;
     RCC->AHB2ENR |= RCC_AHB2ENR_ADCEN;
@@ -150,6 +174,13 @@ uint32_t ADCService_GetRestartCount(void)
     return adc_restart_count;
 }
 
+#ifdef SHOW_SAMPLING_LOG
+uint32_t ADCService_GetFramePeriodUs(void)
+{
+    return adc_frame_period_us;
+}
+#endif
+
 uint32_t ADCService_GetLastMinimum(void)
 {
     return 0U;
@@ -190,6 +221,9 @@ void GPDMA1_Channel0_IRQHandler(void)
         GPDMA1_Channel0->CFCR |= DMA_CFCR_HTF;
 
         active_buffer_offset = 0U;
+    #ifdef SHOW_SAMPLING_LOG
+        ADCService_RecordFrameTimestamp();
+    #endif
         new_frame_ready = true;
         adc_completed_count++;
     }
@@ -200,6 +234,9 @@ void GPDMA1_Channel0_IRQHandler(void)
         GPDMA1_Channel0->CFCR |= DMA_CFCR_TCF;
 
         active_buffer_offset = ADC_HALF_BUFFER_SIZE;
+    #ifdef SHOW_SAMPLING_LOG
+        ADCService_RecordFrameTimestamp();
+    #endif
         new_frame_ready = true;
         adc_completed_count++;
     }

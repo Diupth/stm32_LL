@@ -25,5 +25,8 @@ uint32_t ADCService_GetLastMaximum(void);
 // Copy the newest completed 2048-sample frame into dest.
 // Returns true when a new frame was available and copied.
 bool ADCService_ReadFrame(int16_t *dest);
+#ifdef SHOW_SAMPLING_LOG
+uint32_t ADCService_GetFramePeriodUs(void);
+#endif
 
 #endif /* ADCSERVICE_H */

@@ -19,12 +19,21 @@ add_compile_definitions(
     CFG_TUSB_MCU=OPT_MCU_STM32H5
 )
 
+add_definitions(
+    -DSHOW_SAMPLING_LOG
+)
+
 # Source files
 set(SOURCES
     # Application & System sources
     Src/main.c
     Startup/system_stm32h5xx.c
     Startup/startup_stm32h562xx.s
+
+    # Applications
+    Src/Apps/Receiver.c
+    Src/Apps/Transmitter.c
+    Src/Apps/SyncSignalApp.c
 
     # Services
     Src/Services/ComMgr.c
@@ -62,6 +71,7 @@ set(SOURCES
 # Include directories
 set(INC_DIRS
     Inc
+    Src/Apps
     Src/Services
     Src/Drivers/CMSIS/Include
     Src/Drivers/CMSIS/Device/ST/STM32H5xx/Include

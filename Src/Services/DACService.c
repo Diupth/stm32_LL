@@ -1,18 +1,28 @@
 #include "DACService.h"
 #include "stm32h5xx.h"
-#include <math.h>
 
-// DAC waveform generator service.
-// It builds a 2048-sample sine table and replays it continuously via DMA.
-// The timer provides the sample clock, and the DAC updates the analog output at each trigger.
-
-#define DAC_BUFFER_SIZE 2048U
-#define PI 3.14159265358979323846f
-
-// Sine wave buffer used as the DMA source for DAC1 Channel 1.
-// 32-byte alignment is used to keep the buffer safe for hardware DMA transfers.
-__attribute__((aligned(32))) static uint16_t dac_buffer[DAC_BUFFER_SIZE];
 static volatile uint32_t dac_completed_count = 0;
+#ifdef SHOW_SAMPLING_LOG
+static volatile uint32_t dac_last_timestamp = 0;
+static volatile uint32_t dac_frame_period_us = 0;
+
+static void DACService_EnableCycleCounter(void)
+{
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CYCCNT = 0U;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+}
+
+static void DACService_RecordFrameTimestamp(void)
+{
+    uint32_t timestamp = DWT->CYCCNT;
+    if (dac_last_timestamp != 0U)
+    {
+        dac_frame_period_us = (timestamp - dac_last_timestamp) / (SystemCoreClock / 1000000U);
+    }
+    dac_last_timestamp = timestamp;
+}
+#endif
 
 // Minimal GPDMA linked-list node: only the fields required for circular reload are kept.
 typedef struct {
@@ -24,21 +34,12 @@ typedef struct {
 
 __attribute__((aligned(32))) static GPDMA_NodeTypeDef dac_dma_node;
 
-void DACService_Init(void)
+void DACService_Init(const uint16_t *samples, uint32_t sample_count)
 {
-    // 1. Generate a 300 Hz sine wave table.
-    // Sample rate = 160 kHz, buffer length = 2048 samples.
-    for (uint32_t i = 0U; i < DAC_BUFFER_SIZE; i++)
-    {
-        // A 12-bit DAC uses values from 0 to 4095.
-        // Mid-scale 2048 corresponds to 1.65V (reference center), with ±2000 amplitude.
-        float val = 2048.0f + 2000.0f * sinf(2.0f * PI * 300.0f * (float)i / 160000.0f);
-        if (val < 0.0f) val = 0.0f;
-        if (val > 4095.0f) val = 4095.0f;
-        dac_buffer[i] = (uint16_t)val;
-    }
-
-    // 2. Bật xung nhịp (clock) cho GPIOA, DAC1 và GPDMA1
+#ifdef SHOW_SAMPLING_LOG
+    DACService_EnableCycleCounter();
+#endif
+    // Bật xung nhịp (clock) cho GPIOA, DAC1 và GPDMA1
     RCC->AHB2ENR |= RCC_AHB2ENR_GPIOAEN;
     RCC->AHB2ENR |= RCC_AHB2ENR_DAC1EN;
     RCC->AHB1ENR |= RCC_AHB1ENR_GPDMA1EN;
@@ -67,11 +68,11 @@ void DACService_Init(void)
     GPDMA1_Channel1->CTR2 = (2U << DMA_CTR2_REQSEL_Pos) | DMA_CTR2_DREQ;
 
     // Gán địa chỉ nguồn (SRAM) và đích (Thanh ghi DHR12R1 của DAC1)
-    GPDMA1_Channel1->CSAR = (uint32_t)dac_buffer;
+    GPDMA1_Channel1->CSAR = (uint32_t)samples;
     GPDMA1_Channel1->CDAR = (uint32_t)&(DAC1->DHR12R1);
 
     // CBR1: Số byte cần truyền trong 1 chu kỳ = 2048 mẫu * 2 bytes/mẫu = 4096 bytes
-    GPDMA1_Channel1->CBR1 = DAC_BUFFER_SIZE * 2U;
+    GPDMA1_Channel1->CBR1 = sample_count * 2U;
 
     // 5. Cài đặt nút LLI để tự động lặp lại (Circular Mode) trỏ ngược về chính nó
     dac_dma_node.CBR1 = GPDMA1_Channel1->CBR1;
@@ -105,7 +106,7 @@ void DACService_Init(void)
     DAC1->CR |= DAC_CR_TEN1 | DAC_CR_DMAEN1;
 
     // Nạp trước mẫu đầu tiên (trung vị 2048) vào thanh ghi đệm để tránh bị tụt áp 0V khi trigger đầu tiên kích hoạt
-    DAC1->DHR12R1 = dac_buffer[0];
+    DAC1->DHR12R1 = samples[0];
 
     // Cho phép DAC1 Channel 1 hoạt động (EN1)
     DAC1->CR |= DAC_CR_EN1;
@@ -117,6 +118,13 @@ uint32_t DACService_GetCompletedCount(void)
     return dac_completed_count;
 }
 
+#ifdef SHOW_SAMPLING_LOG
+uint32_t DACService_GetFramePeriodUs(void)
+{
+    return dac_frame_period_us;
+}
+#endif
+
 // GPDMA1 Channel 1 IRQ handler.
 // Every time the DMA finishes one circular pass, the buffer has been replayed once.
 void GPDMA1_Channel1_IRQHandler(void)
@@ -126,6 +134,9 @@ void GPDMA1_Channel1_IRQHandler(void)
     {
         // Clear transfer complete flag.
         GPDMA1_Channel1->CFCR |= DMA_CFCR_TCF;
+    #ifdef SHOW_SAMPLING_LOG
+        DACService_RecordFrameTimestamp();
+    #endif
         dac_completed_count++;
     }
     
