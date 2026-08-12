@@ -18,9 +18,9 @@ static volatile uint32_t adc_overrun_count = 0;
 static volatile uint32_t adc_dma_error_count = 0;
 static volatile uint32_t adc_restart_count = 0;
 
-// Indicates if a half-buffer just finished and can be consumed by the application.
-static volatile bool new_frame_ready = false;
-static volatile uint32_t active_buffer_offset = 0;
+// One bit per half-buffer. The DMA ISR publishes completed frames and the
+// application consumes them independently, allowing acquisition to continue.
+static volatile uint32_t ready_buffer_mask = 0U;
 #ifdef SHOW_SAMPLING_LOG
 static volatile uint32_t adc_last_timestamp = 0;
 static volatile uint32_t adc_frame_period_us = 0;
@@ -193,18 +193,30 @@ uint32_t ADCService_GetLastMaximum(void)
 
 bool ADCService_ReadFrame(int16_t *dest)
 {
-    if (!new_frame_ready)
+    uint32_t ready = ready_buffer_mask;
+    if (ready == 0U)
     {
         return false;
     }
 
-    uint32_t offset = active_buffer_offset;
+    uint32_t buffer_bit = ready & (~ready + 1U);
+    uint32_t offset = (buffer_bit == 1U) ? 0U : ADC_HALF_BUFFER_SIZE;
+
+    // Claim the completed half atomically. Copying happens after re-enabling
+    // interrupts, so the next half-buffer can be acquired without waiting.
+    __disable_irq();
+    if ((ready_buffer_mask & buffer_bit) == 0U)
+    {
+        __enable_irq();
+        return false;
+    }
+    ready_buffer_mask &= ~buffer_bit;
+    __enable_irq();
 
     for (uint32_t i = 0U; i < ADC_HALF_BUFFER_SIZE; i++)
     {
         dest[i] = (int16_t)adc_double_buffer[offset + i];
     }
-    new_frame_ready = false;
 
     return true;
 }
@@ -220,11 +232,10 @@ void GPDMA1_Channel0_IRQHandler(void)
         // Clear half-transfer flag.
         GPDMA1_Channel0->CFCR |= DMA_CFCR_HTF;
 
-        active_buffer_offset = 0U;
     #ifdef SHOW_SAMPLING_LOG
         ADCService_RecordFrameTimestamp();
     #endif
-        new_frame_ready = true;
+        ready_buffer_mask |= 1U;
         adc_completed_count++;
     }
     
@@ -233,11 +244,10 @@ void GPDMA1_Channel0_IRQHandler(void)
         // Clear full-transfer flag.
         GPDMA1_Channel0->CFCR |= DMA_CFCR_TCF;
 
-        active_buffer_offset = ADC_HALF_BUFFER_SIZE;
     #ifdef SHOW_SAMPLING_LOG
         ADCService_RecordFrameTimestamp();
     #endif
-        new_frame_ready = true;
+        ready_buffer_mask |= 2U;
         adc_completed_count++;
     }
 
