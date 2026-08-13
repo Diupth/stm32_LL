@@ -1,8 +1,8 @@
 #ifndef SYNCSIGNAL_H
 #define SYNCSIGNAL_H
 
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 // Common timing source used to synchronize ADC and DAC conversions.
 // Timer 6 emits a periodic TRGO event at 160 kHz to drive the sample clock.
@@ -14,5 +14,10 @@ uint32_t SyncSignal_GetTimerCounter(void);
 
 // Returns true if the sync timer is currently enabled and running.
 bool SyncSignal_IsTimerEnabled(void);
+
+#ifdef SHOW_ADC_DAC_DEBUG
+// Prepares and sends debug telemetry frame
+void SyncSignal_SendADCDACDebug(uint32_t counter);
+#endif
 
 #endif /* SYNCSIGNAL_H */
