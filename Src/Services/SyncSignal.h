@@ -20,4 +20,9 @@ bool SyncSignal_IsTimerEnabled(void);
 void SyncSignal_SendADCDACDebug(uint32_t counter);
 #endif
 
+#ifdef SHOW_SAMPLING_LOG
+// Prepares and sends sampling log telemetry frame
+void SyncSignal_SendSamplingLog(uint32_t counter);
+#endif
+
 #endif /* SYNCSIGNAL_H */

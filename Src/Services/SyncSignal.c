@@ -123,3 +123,32 @@ void SyncSignal_SendADCDACDebug(uint32_t counter) {
   ComMgr_SendData(frame, sizeof(frame));
 }
 #endif
+
+#ifdef SHOW_SAMPLING_LOG
+#include "ADCService.h"
+#include "DACService.h"
+#include "ComMgr.h"
+
+void SyncSignal_SendSamplingLog(uint32_t counter) {
+  uint8_t log_frame[28] = {'L', 'O', 'G', '1', 0, 0, 0, 0};
+  log_frame[8] = (uint8_t)(counter & 0xFFU);
+  log_frame[9] = (uint8_t)((counter >> 8) & 0xFFU);
+  log_frame[10] = (uint8_t)((counter >> 16) & 0xFFU);
+  log_frame[11] = (uint8_t)((counter >> 24) & 0xFFU);
+
+  uint32_t adc_pri_us = ADCService_GetFramePeriodUs();
+  uint32_t dac_pri_us = DACService_GetFramePeriodUs();
+  uint32_t adc_fs_hz = adc_pri_us == 0U ? 0U : (2048U * 1000000U) / adc_pri_us;
+  uint32_t dac_fs_hz = dac_pri_us == 0U ? 0U : (2048U * 1000000U) / dac_pri_us;
+
+  uint32_t values[] = {adc_fs_hz, adc_pri_us, dac_fs_hz, dac_pri_us};
+  for (uint32_t i = 0U; i < 4U; i++) {
+    for (uint32_t byte = 0U; byte < 4U; byte++) {
+      log_frame[12U + i * 4U + byte] = (uint8_t)(values[i] >> (byte * 8U));
+    }
+  }
+
+  ComMgr_SendData(log_frame, sizeof(log_frame));
+}
+#endif
+
