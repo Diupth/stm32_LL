@@ -32,4 +32,7 @@ void ComMgr_Process(void);
 // Gửi dữ liệu qua USB Virtual COM
 void ComMgr_SendData(void const *data, uint32_t length);
 
+// Lấy kênh Rx được chọn từ SonarViewer
+uint32_t ComMgr_GetRxSelect(void);
+
 #endif /* __COMMGR_H */

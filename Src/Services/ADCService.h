@@ -8,25 +8,24 @@
 // The ADC continuously fills a 4096-sample double buffer in circular mode.
 // Each half-buffer represents one 2048-sample frame, which can be read by the caller.
 
-void ADCService_Init(void);
+void ADCService_Init(uint32_t adc_index);
 
 // Returns the number of completed half-buffer transfers.
-uint32_t ADCService_GetCompletedCount(void);
+uint32_t ADCService_GetCompletedCount(uint32_t adc_index);
 
 // Returns error counters for ADC overrun and DMA issues.
-uint32_t ADCService_GetOverrunCount(void);
-uint32_t ADCService_GetDmaErrorCount(void);
-uint32_t ADCService_GetRestartCount(void);
+uint32_t ADCService_GetOverrunCount(uint32_t adc_index);
+uint32_t ADCService_GetDmaErrorCount(uint32_t adc_index);
+uint32_t ADCService_GetRestartCount(uint32_t adc_index);
 
 // Last min/max values recorded in the last frame. Not yet implemented.
-uint32_t ADCService_GetLastMinimum(void);
-uint32_t ADCService_GetLastMaximum(void);
+uint32_t ADCService_GetLastMinimum(uint32_t adc_index);
+uint32_t ADCService_GetLastMaximum(uint32_t adc_index);
 
-// Copy the newest completed 2048-sample frame into dest.
-// Returns true when a new frame was available and copied.
-bool ADCService_ReadFrame(int16_t *dest);
+bool ADCService_ReadFrame(uint32_t adc_index, int16_t *dest);
+
 #ifdef SHOW_SAMPLING_LOG
-uint32_t ADCService_GetFramePeriodUs(void);
+uint32_t ADCService_GetFramePeriodUs(uint32_t adc_index);
 #endif
 
 #endif /* ADCSERVICE_H */

@@ -59,37 +59,44 @@ void SyncSignal_SendADCDACDebug(uint32_t counter) {
   frame[13] = (uint8_t)((tick >> 8U) & 0xffU);
   frame[14] = (uint8_t)((tick >> 16U) & 0xffU);
   frame[15] = (uint8_t)(tick >> 24U);
-  uint32_t adc_count = ADCService_GetCompletedCount();
+  uint32_t active_rx = ComMgr_GetRxSelect();
+  if (active_rx == 0U) {
+    active_rx = 1U;
+  }
+  uint32_t adc_count = ADCService_GetCompletedCount(active_rx);
   uint32_t dac_count = DACService_GetCompletedCount();
   for (uint32_t index = 0U; index < 4U; index++) {
     frame[16U + index] = (uint8_t)(adc_count >> (index * 8U));
     frame[20U + index] = (uint8_t)(dac_count >> (index * 8U));
   }
+  DMA_Channel_TypeDef *active_dma = (active_rx == 2U) ? GPDMA1_Channel2 : GPDMA1_Channel0;
+  ADC_TypeDef *active_adc = (active_rx == 2U) ? ADC2 : ADC1;
+
   uint32_t timer_counter = SyncSignal_GetTimerCounter();
   for (uint32_t index = 0U; index < 4U; index++) {
     frame[24U + index] = (uint8_t)(timer_counter >> (index * 8U));
   }
   frame[28] = SyncSignal_IsTimerEnabled() ? 1U : 0U;
-  uint32_t registers[] = {ADC1->CR,
-                          ADC1->CFGR,
-                          ADC1->ISR,
+  uint32_t registers[] = {active_adc->CR,
+                          active_adc->CFGR,
+                          active_adc->ISR,
                           DAC1->CR,
-                          GPDMA1_Channel0->CCR,
-                          GPDMA1_Channel0->CSR,
+                          active_dma->CCR,
+                          active_dma->CSR,
                           GPDMA1_Channel1->CCR,
                           GPDMA1_Channel1->CSR,
-                          GPDMA1_Channel0->CLBAR,
-                          GPDMA1_Channel0->CLLR,
-                          GPDMA1_Channel0->CBR1,
+                          active_dma->CLBAR,
+                          active_dma->CLLR,
+                          active_dma->CBR1,
                           GPDMA1_Channel1->CLBAR,
                           GPDMA1_Channel1->CLLR,
                           GPDMA1_Channel1->CBR1,
-                          ADC1->SQR1,
-                          ADC1->SMPR1,
-                          ADC1->DR,
-                          GPDMA1_Channel0->CTR1,
-                          GPDMA1_Channel0->CTR2,
-                          GPDMA1_Channel0->CTR3,
+                          active_adc->SQR1,
+                          active_adc->SMPR1,
+                          active_adc->DR,
+                          active_dma->CTR1,
+                          active_dma->CTR2,
+                          active_dma->CTR3,
                           GPDMA1_Channel1->CTR1,
                           DAC1->DHR12R1,
                           TIM6->CR1,
@@ -102,17 +109,17 @@ void SyncSignal_SendADCDACDebug(uint32_t counter) {
           (uint8_t)(registers[register_index] >> (byte_index * 8U));
     }
   }
-  uint32_t diagnostics[] = {ADCService_GetOverrunCount(),
-                            ADCService_GetDmaErrorCount(),
-                            ADCService_GetRestartCount(),
-                            GPDMA1_Channel0->CTR3,
-                            ADC1->IER,
-                            ADCService_GetLastMinimum(),
-                            ADCService_GetLastMaximum(),
-                            GPDMA1_Channel0->CDAR,
-                            GPDMA1_Channel0->CLLR,
-                            ADCService_GetLastMinimum(),
-                            ADCService_GetLastMaximum()};
+  uint32_t diagnostics[] = {ADCService_GetOverrunCount(active_rx),
+                            ADCService_GetDmaErrorCount(active_rx),
+                            ADCService_GetRestartCount(active_rx),
+                            active_dma->CTR3,
+                            active_adc->IER,
+                            ADCService_GetLastMinimum(active_rx),
+                            ADCService_GetLastMaximum(active_rx),
+                            active_dma->CDAR,
+                            active_dma->CLLR,
+                            ADCService_GetLastMinimum(active_rx),
+                            ADCService_GetLastMaximum(active_rx)};
   for (uint32_t diagnostic_index = 0U; diagnostic_index < 8U;
        diagnostic_index++) {
     for (uint32_t byte_index = 0U; byte_index < 4U; byte_index++) {
@@ -130,19 +137,22 @@ void SyncSignal_SendADCDACDebug(uint32_t counter) {
 #include "ComMgr.h"
 
 void SyncSignal_SendSamplingLog(uint32_t counter) {
-  uint8_t log_frame[28] = {'L', 'O', 'G', '1', 0, 0, 0, 0};
+  uint8_t log_frame[36] = {'L', 'O', 'G', '1', 0, 0, 0, 0};
   log_frame[8] = (uint8_t)(counter & 0xFFU);
   log_frame[9] = (uint8_t)((counter >> 8) & 0xFFU);
   log_frame[10] = (uint8_t)((counter >> 16) & 0xFFU);
   log_frame[11] = (uint8_t)((counter >> 24) & 0xFFU);
 
-  uint32_t adc_pri_us = ADCService_GetFramePeriodUs();
+  uint32_t adc1_pri_us = ADCService_GetFramePeriodUs(1U);
+  uint32_t adc2_pri_us = ADCService_GetFramePeriodUs(2U);
   uint32_t dac_pri_us = DACService_GetFramePeriodUs();
-  uint32_t adc_fs_hz = adc_pri_us == 0U ? 0U : (2048U * 1000000U) / adc_pri_us;
+
+  uint32_t adc1_fs_hz = adc1_pri_us == 0U ? 0U : (2048U * 1000000U) / adc1_pri_us;
+  uint32_t adc2_fs_hz = adc2_pri_us == 0U ? 0U : (2048U * 1000000U) / adc2_pri_us;
   uint32_t dac_fs_hz = dac_pri_us == 0U ? 0U : (2048U * 1000000U) / dac_pri_us;
 
-  uint32_t values[] = {adc_fs_hz, adc_pri_us, dac_fs_hz, dac_pri_us};
-  for (uint32_t i = 0U; i < 4U; i++) {
+  uint32_t values[] = {adc1_fs_hz, adc1_pri_us, adc2_fs_hz, adc2_pri_us, dac_fs_hz, dac_pri_us};
+  for (uint32_t i = 0U; i < 6U; i++) {
     for (uint32_t byte = 0U; byte < 4U; byte++) {
       log_frame[12U + i * 4U + byte] = (uint8_t)(values[i] >> (byte * 8U));
     }

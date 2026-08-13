@@ -16,6 +16,7 @@ static uint32_t tx_queue_head;                 // Vị trí ghi dữ liệu mớ
 static uint32_t tx_queue_tail;                 // Vị trí đọc dữ liệu cũ để gửi đi.
 static char rx_command[32];
 static uint32_t rx_command_length;
+static uint32_t rx_select = 0; // Mặc định không gửi (Rx 0)
 
 // Tính số byte hiện đang chờ trong queue.
 static uint32_t ComMgr_TxQueued(void)
@@ -132,6 +133,10 @@ void tud_cdc_rx_cb(uint8_t itf)
       {
         Transmitter_SetPulseType(TRANSMITTER_PULSE_SINGLE);
       }
+      else if (strncmp(rx_command, "rx_select:", 10) == 0)
+      {
+        rx_select = (uint32_t)(rx_command[10] - '0');
+      }
       rx_command_length = 0U;
     }
     else if (rx_command_length < sizeof(rx_command) - 1U)
@@ -143,6 +148,11 @@ void tud_cdc_rx_cb(uint8_t itf)
       rx_command_length = 0U;
     }
   }
+}
+
+uint32_t ComMgr_GetRxSelect(void)
+{
+    return rx_select;
 }
 
 void ComMgr_SendData(void const *data, uint32_t length)

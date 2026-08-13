@@ -42,24 +42,33 @@ static const uint16_t transmitter_barker13_waveform[TRANSMITTER_SAMPLE_COUNT] = 
     [TRANSMITTER_BARKER13_LENGTH ... TRANSMITTER_SAMPLE_COUNT - 1U] = TRANSMITTER_BIAS
 };
 
-static uint16_t transmitter_samples[TRANSMITTER_SAMPLE_COUNT]
+static volatile uint16_t transmitter_samples[TRANSMITTER_SAMPLE_COUNT]
     __attribute__((aligned(32)));
 
 void Transmitter_Init(void)
 {
-    (void)memcpy(transmitter_samples, transmitter_single_waveform, sizeof(transmitter_samples));
+    (void)memcpy((void *)transmitter_samples, transmitter_single_waveform, sizeof(transmitter_samples));
 
-    DACService_Init(transmitter_samples, TRANSMITTER_SAMPLE_COUNT);
+    DACService_Init((const uint16_t *)transmitter_samples, TRANSMITTER_SAMPLE_COUNT);
 }
 
 void Transmitter_SetPulseType(Transmitter_PulseType pulse_type)
 {
-    if (pulse_type == TRANSMITTER_PULSE_BARKER13)
+    const uint16_t *src = NULL;
+
+    switch (pulse_type)
     {
-        (void)memcpy(transmitter_samples, transmitter_barker13_waveform, sizeof(transmitter_samples));
+        case TRANSMITTER_PULSE_BARKER13:
+            src = transmitter_barker13_waveform;
+            break;
+        case TRANSMITTER_PULSE_SINGLE:
+        default:
+            src = transmitter_single_waveform;
+            break;
     }
-    else
+
+    if (src != NULL)
     {
-        (void)memcpy(transmitter_samples, transmitter_single_waveform, sizeof(transmitter_samples));
+        (void)memcpy((void *)transmitter_samples, src, sizeof(transmitter_samples));
     }
 }
