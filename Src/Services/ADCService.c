@@ -38,7 +38,12 @@ static void ADCService_RecordFrameTimestamp(uint32_t adc_index)
     uint32_t idx = adc_index - 1U;
     if (adc_last_timestamps[idx] != 0U)
     {
-        adc_frame_period_us[idx] = (timestamp - adc_last_timestamps[idx]) / (SystemCoreClock / 1000000U);
+        uint32_t delta = timestamp - adc_last_timestamps[idx];
+        uint32_t divisor = SystemCoreClock / 1000000U;
+        if (divisor > 0U)
+        {
+            adc_frame_period_us[idx] = (delta + (divisor / 2U)) / divisor;
+        }
     }
     adc_last_timestamps[idx] = timestamp;
 }

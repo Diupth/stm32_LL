@@ -18,7 +18,12 @@ static void DACService_RecordFrameTimestamp(void)
     uint32_t timestamp = DWT->CYCCNT;
     if (dac_last_timestamp != 0U)
     {
-        dac_frame_period_us = (timestamp - dac_last_timestamp) / (SystemCoreClock / 1000000U);
+        uint32_t delta = timestamp - dac_last_timestamp;
+        uint32_t divisor = SystemCoreClock / 1000000U;
+        if (divisor > 0U)
+        {
+            dac_frame_period_us = (delta + (divisor / 2U)) / divisor;
+        }
     }
     dac_last_timestamp = timestamp;
 }
