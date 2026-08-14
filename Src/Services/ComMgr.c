@@ -17,6 +17,7 @@ static uint32_t tx_queue_tail;                 // Vị trí đọc dữ liệu c
 static char rx_command[32];
 static uint32_t rx_command_length;
 static uint32_t rx_select = 0; // Mặc định không gửi (Rx 0)
+static volatile uint8_t bpf_enabled = 1U; // Mặc định bật BPF (volatile để tránh tối ưu hóa ngắt)
 
 // Tính số byte hiện đang chờ trong queue.
 static uint32_t ComMgr_TxQueued(void)
@@ -137,6 +138,14 @@ void tud_cdc_rx_cb(uint8_t itf)
       {
         rx_select = (uint32_t)(rx_command[10] - '0');
       }
+      else if (strcmp(rx_command, "mode:raw") == 0)
+      {
+        bpf_enabled = 0U;
+      }
+      else if (strcmp(rx_command, "mode:bpf") == 0)
+      {
+        bpf_enabled = 1U;
+      }
       rx_command_length = 0U;
     }
     else if (rx_command_length < sizeof(rx_command) - 1U)
@@ -155,8 +164,19 @@ uint32_t ComMgr_GetRxSelect(void)
     return rx_select;
 }
 
+uint8_t ComMgr_IsBpfEnabled(void)
+{
+    return bpf_enabled;
+}
+
 void ComMgr_SendData(void const *data, uint32_t length)
 {
+    // Chỉ gửi dữ liệu khi Host thực sự đang kết nối để tránh kẹt bộ đệm USB
+    if (!tud_cdc_connected())
+    {
+        return;
+    }
+
     // Hàm này không chờ USB; nếu dữ liệu chưa gửi được thì queue giữ lại.
     if (data == NULL || length == 0U)
     {
@@ -176,6 +196,20 @@ void ComMgr_SendData(void const *data, uint32_t length)
     {
         tx_queue[tx_queue_head] = buffer[index];
         tx_queue_head = (tx_queue_head + 1U) % COMMGR_TX_QUEUE_SIZE;
+    }
+}
+
+// Callback của TinyUSB khi trạng thái kết nối cổng COM thay đổi (DTR/RTS)
+void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts)
+{
+    (void)itf;
+    (void)rts;
+    if (!dtr)
+    {
+        // Host đã ngắt kết nối, xóa sạch hàng đợi để giải phóng bộ đệm USB
+        tx_queue_head = 0U;
+        tx_queue_tail = 0U;
+        tud_cdc_write_clear();
     }
 }
 

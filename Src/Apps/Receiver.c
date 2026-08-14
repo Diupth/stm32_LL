@@ -35,6 +35,7 @@ static int16_t adc2_frame_buffer[FRAME_SAMPLES];
 
 // BPF Filter States - Mảng chứa trạng thái bộ lọc BPF 35-45 kHz cho 2 kênh
 static BPF_State_t bpf_states[2] = { {0, 0, 0, 0}, {0, 0, 0, 0} };
+static int16_t raw_active_buffer[FRAME_SAMPLES];
 
 #ifdef SHOW_SAMPLING_LOG
 static uint32_t log_counter = 0U;
@@ -47,23 +48,23 @@ static void Receiver_FilterBPF(int16_t *buffer, uint32_t length, BPF_State_t *st
     {
         // Loại bỏ DC bias
         int32_t x_q16 = ((int32_t)buffer[i] - ADC_BIAS) << 16;
-        
+
         // Phương trình sai phân: y[n] = (x[n] - x[n-2]) / 8 - 0.75 * y[n-2]
         int32_t diff_x = x_q16 - (state->x2);
         int32_t term1 = diff_x >> BPF_GAIN_SHIFT;
         int32_t term2 = (state->y2) - ((state->y2) >> BPF_FEEDBACK_SHIFT);
         int32_t y_q16 = term1 - term2;
-        
+
         // Cập nhật trạng thái lịch sử
         state->x2 = state->x1;
         state->x1 = x_q16;
-        
+
         state->y2 = state->y1;
         state->y1 = y_q16;
-        
+
         // Đưa về dạng 12-bit nguyên bản và cộng lại DC bias
         int32_t bp = (y_q16 >> 16) + ADC_BIAS;
-        
+
         // Giới hạn trong dải ADC 12-bit [0, 4095]
         if (bp > ADC_MAX_VAL)
         {
@@ -73,7 +74,7 @@ static void Receiver_FilterBPF(int16_t *buffer, uint32_t length, BPF_State_t *st
         {
             bp = 0;
         }
-        
+
         buffer[i] = (int16_t)bp;
     }
 }
@@ -109,6 +110,19 @@ void Receiver_Process(void)
 #endif
 
     int16_t *buffers[2] = { adc1_frame_buffer, adc2_frame_buffer };
+    uint32_t rx_chan = ComMgr_GetRxSelect();
+    bool active_has_frame = (rx_chan >= 1U && rx_chan <= 2U && has_frame[rx_chan - 1U]);
+
+    // Lưu lại tín hiệu thô trước khi lọc BPF cho kênh đang chọn
+    if (active_has_frame)
+    {
+        for (uint32_t i = 0U; i < FRAME_SAMPLES; i++)
+        {
+            raw_active_buffer[i] = buffers[rx_chan - 1U][i];
+        }
+    }
+
+    // Luôn tiến hành lọc BPF đầy đủ trên cả 2 kênh để tính toán thời gian DSP chuẩn xác
     for (uint32_t i = 0U; i < 2U; i++)
     {
         if (has_frame[i])
@@ -120,12 +134,18 @@ void Receiver_Process(void)
 #ifdef SHOW_SAMPLING_LOG
     uint32_t t_bpf_end = DWT->CYCCNT;
 #endif
-    uint32_t rx_chan = ComMgr_GetRxSelect();
-    int16_t *active_buffer = NULL;
 
-    if (rx_chan >= 1U && rx_chan <= 2U && has_frame[rx_chan - 1U])
+    int16_t *send_buffer = NULL;
+    if (active_has_frame)
     {
-        active_buffer = buffers[rx_chan - 1U];
+        if (ComMgr_IsBpfEnabled())
+        {
+            send_buffer = buffers[rx_chan - 1U];
+        }
+        else
+        {
+            send_buffer = raw_active_buffer;
+        }
     }
 
 #ifdef SHOW_SAMPLING_LOG
@@ -134,7 +154,7 @@ void Receiver_Process(void)
 #endif
     bool sent = false;
 
-    if (active_buffer != NULL)
+    if (send_buffer != NULL)
     {
 #ifdef SHOW_SAMPLING_LOG
         t_send_start = DWT->CYCCNT;
@@ -143,8 +163,8 @@ void Receiver_Process(void)
         for (uint32_t i = 0U; i < FRAME_SAMPLES; i++)
         {
             // Copy 16-bit values into byte array (little-endian)
-            receiver_frame[FRAME_HEADER_SIZE + i * 2] = (uint8_t)(active_buffer[i] & 0xFF);
-            receiver_frame[FRAME_HEADER_SIZE + i * 2 + 1] = (uint8_t)((active_buffer[i] >> 8) & 0xFF);
+            receiver_frame[FRAME_HEADER_SIZE + i * 2] = (uint8_t)(send_buffer[i] & 0xFF);
+            receiver_frame[FRAME_HEADER_SIZE + i * 2 + 1] = (uint8_t)((send_buffer[i] >> 8) & 0xFF);
         }
         ComMgr_SendData(receiver_frame, sizeof(receiver_frame));
 #ifdef SHOW_SAMPLING_LOG

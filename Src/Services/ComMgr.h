@@ -35,4 +35,7 @@ void ComMgr_SendData(void const *data, uint32_t length);
 // Lấy kênh Rx được chọn từ SonarViewer
 uint32_t ComMgr_GetRxSelect(void);
 
+// Kiểm tra bộ lọc BPF có đang được bật hay không
+uint8_t ComMgr_IsBpfEnabled(void);
+
 #endif /* __COMMGR_H */
