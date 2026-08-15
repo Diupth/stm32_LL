@@ -22,7 +22,7 @@ static volatile StreamMode_t stream_mode = STREAM_MODE_BPF; // Mặc định b�
 // Tính số byte hiện đang chờ trong queue.
 static uint32_t ComMgr_TxQueued(void)
 {
-  return (tx_queue_head - tx_queue_tail) % COMMGR_TX_QUEUE_SIZE;
+  return (tx_queue_head - tx_queue_tail) & (COMMGR_TX_QUEUE_SIZE - 1U);
 }
 
 // Tính số byte còn có thể ghi mà không làm mất dữ liệu đang chờ.
@@ -200,11 +200,18 @@ void ComMgr_SendData(void const *data, uint32_t length)
     uint32_t accepted = length;
     uint8_t const *buffer = (uint8_t const *)data;
 
-    // Chép dữ liệu vào queue và tăng head theo kiểu vòng tròn.
-    for (uint32_t index = 0U; index < accepted; index++)
+    // Chép dữ liệu nhanh bằng memcpy thay vì byte-by-byte loop
+    uint32_t space_to_end = COMMGR_TX_QUEUE_SIZE - tx_queue_head;
+    if (accepted <= space_to_end)
     {
-        tx_queue[tx_queue_head] = buffer[index];
-        tx_queue_head = (tx_queue_head + 1U) % COMMGR_TX_QUEUE_SIZE;
+        memcpy(&tx_queue[tx_queue_head], buffer, accepted);
+        tx_queue_head = (tx_queue_head + accepted) & (COMMGR_TX_QUEUE_SIZE - 1U);
+    }
+    else
+    {
+        memcpy(&tx_queue[tx_queue_head], buffer, space_to_end);
+        memcpy(tx_queue, buffer + space_to_end, accepted - space_to_end);
+        tx_queue_head = accepted - space_to_end;
     }
 }
 
