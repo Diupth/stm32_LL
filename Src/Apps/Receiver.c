@@ -163,7 +163,118 @@ Complex_t* Receiver_GetComplexBuffer(uint32_t channel)
     return NULL;
 }
 
+// Gửi frame dữ liệu của kênh đang chọn dựa trên chế độ truyền tải (Stream Mode)
+static void Receiver_SendActiveFrame(uint32_t rx_chan, int16_t *buffers[2])
+{
+    // Ghi số hiệu kênh nhận (1 hoặc 2) vào byte thứ 4 của header
+    receiver_frame[3] = (uint8_t)('0' + rx_chan);
+    StreamMode_t mode = ComMgr_GetStreamMode();
 
+    if (mode == STREAM_MODE_DEMOD)
+    {
+        // Chế độ IQ Demodulation: Tính biên độ tín hiệu phức (Magnitude = sqrt(I^2 + Q^2))
+        const Complex_t *chan_buf = complex_buffers[rx_chan - 1U];
+        for (uint32_t i = 0U; i < FRAME_SAMPLES; i++)
+        {
+            int32_t re = (int32_t)chan_buf[i].re;
+            int32_t im = (int32_t)chan_buf[i].im;
+            uint32_t norm = (uint32_t)re * (uint32_t)re + (uint32_t)im * (uint32_t)im;
+            int16_t val = (int16_t)int_sqrt(norm);
+            
+            // Ghi giá trị 16-bit (Little-Endian) vào payload của frame
+            receiver_frame[FRAME_HEADER_SIZE + i * 2] = (uint8_t)(val & 0xFF);
+            receiver_frame[FRAME_HEADER_SIZE + i * 2 + 1] = (uint8_t)((val >> 8) & 0xFF);
+        }
+    }
+    else if (mode == STREAM_MODE_BPF)
+    {
+        // Chế độ Bandpass Filter: Gửi trực tiếp tín hiệu đã qua bộ lọc BPF
+        const int16_t *send_buffer = buffers[rx_chan - 1U];
+        for (uint32_t i = 0U; i < FRAME_SAMPLES; i++)
+        {
+            int16_t val = send_buffer[i];
+            
+            // Ghi giá trị 16-bit (Little-Endian) vào payload của frame
+            receiver_frame[FRAME_HEADER_SIZE + i * 2] = (uint8_t)(val & 0xFF);
+            receiver_frame[FRAME_HEADER_SIZE + i * 2 + 1] = (uint8_t)((val >> 8) & 0xFF);
+        }
+    }
+    else
+    {
+        // Chế độ Raw: Gửi tín hiệu thô được lưu trữ trước khi lọc BPF
+        for (uint32_t i = 0U; i < FRAME_SAMPLES; i++)
+        {
+            int16_t val = raw_active_buffer[i];
+            
+            // Ghi giá trị 16-bit (Little-Endian) vào payload của frame
+            receiver_frame[FRAME_HEADER_SIZE + i * 2] = (uint8_t)(val & 0xFF);
+            receiver_frame[FRAME_HEADER_SIZE + i * 2 + 1] = (uint8_t)((val >> 8) & 0xFF);
+        }
+    }
+    
+    // Gửi gói tin hoàn chỉnh qua UART/USB qua ComMgr
+    ComMgr_SendData(receiver_frame, sizeof(receiver_frame));
+}
+
+#ifdef SHOW_SAMPLING_LOG
+static void Receiver_SendDSPLog(bool has_frame[2], uint32_t t_start, uint32_t t_read_start, uint32_t t_read_end, 
+                                 uint32_t t_bpf_start, uint32_t t_bpf_end, uint32_t t_demod_start, uint32_t t_demod_end,
+                                 bool sent, uint32_t t_send_start, uint32_t t_send_end)
+{
+    uint32_t t_end = DWT->CYCCNT;
+
+    if (has_frame[0] || has_frame[1])
+    {
+        log_counter++;
+        if (log_counter >= LOG_INTERVAL_FRAMES)
+        {
+            log_counter = 0U; // Đã khôi phục câu lệnh reset biến đếm log
+            uint32_t clock_mhz = SystemCoreClock / 1000000U;
+            if (clock_mhz == 0U)
+            {
+                clock_mhz = FALLBACK_CLOCK_MHZ;
+            }
+
+            uint32_t total_cycles = t_end - t_start;
+            uint32_t read_cycles = t_read_end - t_read_start;
+            uint32_t bpf_cycles = t_bpf_end - t_bpf_start;
+            uint32_t demod_cycles = t_demod_end - t_demod_start;
+            uint32_t send_cycles = sent ? (t_send_end - t_send_start) : 0U;
+
+            uint32_t total_us = total_cycles / clock_mhz;
+            uint32_t read_us = read_cycles / clock_mhz;
+            uint32_t bpf_us = bpf_cycles / clock_mhz;
+            uint32_t demod_us = demod_cycles / clock_mhz;
+            uint32_t send_us = send_cycles / clock_mhz;
+
+            // Sắp xếp bản tin nhị phân gửi đi
+            uint8_t dsp_frame[DSP_FRAME_SIZE];
+            dsp_frame[0] = 'D';
+            dsp_frame[1] = 'S';
+            dsp_frame[2] = 'P';
+            dsp_frame[3] = '1';
+
+            // Sequence (Little-Endian)
+            dsp_frame[4] = (uint8_t)(log_counter & 0xFFU);
+            dsp_frame[5] = (uint8_t)((log_counter >> 8U) & 0xFFU);
+            dsp_frame[6] = (uint8_t)((log_counter >> 16U) & 0xFFU);
+            dsp_frame[7] = (uint8_t)((log_counter >> 24U) & 0xFFU);
+
+            // Ghi các giá trị payload (mỗi giá trị 4 bytes)
+            uint32_t values[DSP_VALUE_COUNT] = { total_us, read_us, bpf_us, demod_us, send_us };
+            for (uint32_t v = 0U; v < DSP_VALUE_COUNT; v++)
+            {
+                for (uint32_t b = 0U; b < 4U; b++)
+                {
+                    dsp_frame[DSP_HEADER_SIZE + v * 4U + b] = (uint8_t)(values[v] >> (b * 8U));
+                }
+            }
+
+            ComMgr_SendData(dsp_frame, sizeof(dsp_frame));
+        }
+    }
+}
+#endif
 
 void Receiver_Init(void)
 {
@@ -246,41 +357,7 @@ void Receiver_Process(void)
 #ifdef SHOW_SAMPLING_LOG
         t_send_start = DWT->CYCCNT;
 #endif
-        receiver_frame[3] = (uint8_t)('0' + rx_chan);
-        StreamMode_t mode = ComMgr_GetStreamMode();
-        if (mode == STREAM_MODE_DEMOD)
-        {
-            const Complex_t *chan_buf = complex_buffers[rx_chan - 1U];
-            for (uint32_t i = 0U; i < FRAME_SAMPLES; i++)
-            {
-                int32_t re = (int32_t)chan_buf[i].re;
-                int32_t im = (int32_t)chan_buf[i].im;
-                uint32_t norm = (uint32_t)re * (uint32_t)re + (uint32_t)im * (uint32_t)im;
-                int16_t val = (int16_t)int_sqrt(norm);
-                receiver_frame[FRAME_HEADER_SIZE + i * 2] = (uint8_t)(val & 0xFF);
-                receiver_frame[FRAME_HEADER_SIZE + i * 2 + 1] = (uint8_t)((val >> 8) & 0xFF);
-            }
-        }
-        else if (mode == STREAM_MODE_BPF)
-        {
-            const int16_t *send_buffer = buffers[rx_chan - 1U];
-            for (uint32_t i = 0U; i < FRAME_SAMPLES; i++)
-            {
-                int16_t val = send_buffer[i];
-                receiver_frame[FRAME_HEADER_SIZE + i * 2] = (uint8_t)(val & 0xFF);
-                receiver_frame[FRAME_HEADER_SIZE + i * 2 + 1] = (uint8_t)((val >> 8) & 0xFF);
-            }
-        }
-        else
-        {
-            for (uint32_t i = 0U; i < FRAME_SAMPLES; i++)
-            {
-                int16_t val = raw_active_buffer[i];
-                receiver_frame[FRAME_HEADER_SIZE + i * 2] = (uint8_t)(val & 0xFF);
-                receiver_frame[FRAME_HEADER_SIZE + i * 2 + 1] = (uint8_t)((val >> 8) & 0xFF);
-            }
-        }
-        ComMgr_SendData(receiver_frame, sizeof(receiver_frame));
+        Receiver_SendActiveFrame(rx_chan, buffers);
 #ifdef SHOW_SAMPLING_LOG
         t_send_end = DWT->CYCCNT;
 #endif
@@ -288,57 +365,7 @@ void Receiver_Process(void)
     }
 
 #ifdef SHOW_SAMPLING_LOG
-    uint32_t t_end = DWT->CYCCNT;
-
-    if (has_frame[0] || has_frame[1])
-    {
-        log_counter++;
-        if (log_counter >= LOG_INTERVAL_FRAMES)
-        {
-            log_counter = 0U; // Đã khôi phục câu lệnh reset biến đếm log
-            uint32_t clock_mhz = SystemCoreClock / 1000000U;
-            if (clock_mhz == 0U)
-            {
-                clock_mhz = FALLBACK_CLOCK_MHZ;
-            }
-
-            uint32_t total_cycles = t_end - t_start;
-            uint32_t read_cycles = t_read_end - t_read_start;
-            uint32_t bpf_cycles = t_bpf_end - t_bpf_start;
-            uint32_t demod_cycles = t_demod_end - t_demod_start;
-            uint32_t send_cycles = sent ? (t_send_end - t_send_start) : 0U;
-
-            uint32_t total_us = total_cycles / clock_mhz;
-            uint32_t read_us = read_cycles / clock_mhz;
-            uint32_t bpf_us = bpf_cycles / clock_mhz;
-            uint32_t demod_us = demod_cycles / clock_mhz;
-            uint32_t send_us = send_cycles / clock_mhz;
-
-            // Sắp xếp bản tin nhị phân gửi đi
-            uint8_t dsp_frame[DSP_FRAME_SIZE];
-            dsp_frame[0] = 'D';
-            dsp_frame[1] = 'S';
-            dsp_frame[2] = 'P';
-            dsp_frame[3] = '1';
-
-            // Sequence (Little-Endian)
-            dsp_frame[4] = (uint8_t)(log_counter & 0xFFU);
-            dsp_frame[5] = (uint8_t)((log_counter >> 8U) & 0xFFU);
-            dsp_frame[6] = (uint8_t)((log_counter >> 16U) & 0xFFU);
-            dsp_frame[7] = (uint8_t)((log_counter >> 24U) & 0xFFU);
-
-            // Ghi các giá trị payload (mỗi giá trị 4 bytes)
-            uint32_t values[DSP_VALUE_COUNT] = { total_us, read_us, bpf_us, demod_us, send_us };
-            for (uint32_t v = 0U; v < DSP_VALUE_COUNT; v++)
-            {
-                for (uint32_t b = 0U; b < 4U; b++)
-                {
-                    dsp_frame[DSP_HEADER_SIZE + v * 4U + b] = (uint8_t)(values[v] >> (b * 8U));
-                }
-            }
-
-            ComMgr_SendData(dsp_frame, sizeof(dsp_frame));
-        }
-    }
+    Receiver_SendDSPLog(has_frame, t_start, t_read_start, t_read_end, t_bpf_start, t_bpf_end, 
+                        t_demod_start, t_demod_end, sent, t_send_start, t_send_end);
 #endif
 }
