@@ -52,7 +52,7 @@
 #define FALLBACK_CLOCK_MHZ            250U
 
 #define DSP_HEADER_SIZE               8U
-#define DSP_VALUE_COUNT               7U
+#define DSP_VALUE_COUNT               8U
 #define DSP_FRAME_SIZE                (DSP_HEADER_SIZE + (DSP_VALUE_COUNT * 4U))
 
 typedef struct {
@@ -86,6 +86,7 @@ static bool cached_has_frame[CHANNEL_COUNT] = {false, false};
 static uint32_t t_send_start = 0U;
 static uint32_t t_send_end = 0U;
 static uint32_t t_accum_cycles = 0U;
+static uint32_t t_detect_cycles = 0U;
 static bool sent = false;
 #endif
 
@@ -374,6 +375,65 @@ static void Receiver_SendActiveFrame(void)
     ComMgr_SendData(receiver_frame, sizeof(receiver_frame));
 }
 
+static void Receiver_DetectAndSendTargets(void)
+{
+#ifdef SHOW_SAMPLING_LOG
+    uint32_t t_detect_start = DWT->CYCCNT;
+#endif
+
+    const uint32_t *accum_buf = accumulated_sum_norm;
+
+    // Tìm đỉnh tín hiệu trong vùng tín hiệu khả dụng (bỏ qua vùng nhiễu crosstalk phát ban đầu)
+    uint32_t start_idx = 120U;
+    uint32_t max_idx = start_idx;
+    uint32_t max_val = accum_buf[start_idx];
+
+    for (uint32_t i = start_idx + 1U; i < FRAME_SAMPLES; i++)
+    {
+        if (accum_buf[i] > max_val)
+        {
+            max_val = accum_buf[i];
+            max_idx = i;
+        }
+    }
+
+    // Trừ độ trễ nhóm của bộ lọc tương thích (Matched Filter Group Delay) để cự li chính xác tuyệt đối
+    Transmitter_PulseType pulse_type = Transmitter_GetPulseType();
+    uint32_t filter_delay = (pulse_type == TRANSMITTER_PULSE_BARKER13) ? BARKER13_TOTAL_PREFIX_SAMPLES : SINGLE_PULSE_PREFIX_SAMPLES;
+    uint32_t true_idx = (max_idx > filter_delay) ? (max_idx - filter_delay) : 0U;
+
+    // Tính Cự li (mét): Range = (true_idx * SPEED_OF_SOUND) / (2 * FS)
+    // SPEED_OF_SOUND = 343.0 m/s, FS = 160000.0 Hz -> (343.0 / 320000.0) = 0.001071875
+    float range_m = ((float)true_idx * 343.0f) / (2.0f * 160000.0f);
+
+    // Tính Cường độ (dBV): Quy đổi giá trị tích lũy về điện thế RMS và tính dBV
+    uint32_t avg_norm = max_val >> ACCUM_NORM_SCALE_SHIFT;
+    float mag = sqrtf((float)avg_norm * 2048.0f);
+    float voltage = (mag / 8192.0f) * 3.3f;
+    float strength_dbv = 20.0f * log10f(fmaxf(voltage, 1e-4f));
+
+#ifdef SHOW_SAMPLING_LOG
+    uint32_t t_detect_end = DWT->CYCCNT;
+    t_detect_cycles = t_detect_end - t_detect_start;
+#endif
+
+    // Đóng gói khung dữ liệu mục tiêu TGT1
+    TargetFrame_t target_frame;
+    target_frame.header[0] = 'T';
+    target_frame.header[1] = 'G';
+    target_frame.header[2] = 'T';
+    target_frame.header[3] = '1';
+    target_frame.target_count = 1U;
+    target_frame.reserved = 0U;
+    target_frame.targets[0].range_m = range_m;
+    target_frame.targets[0].strength_dbv = strength_dbv;
+    target_frame.targets[0].angle_deg = 90;       // Mặc định góc 90 độ (sẽ bổ sung góc quét sau)
+    target_frame.targets[0].reserved = 0;
+    target_frame.targets[0].velocity_mps = 0.0f;  // Mặc định 0.0 m/s (sẽ bổ sung vận tốc sau)
+
+    ComMgr_SendData(&target_frame, sizeof(target_frame));
+}
+
 static void Receiver_AccumulateAndProcess(void)
 {
     if (pulse_idx == 0U)
@@ -413,7 +473,7 @@ static void Receiver_AccumulateAndProcess(void)
 #endif
 
     uint32_t rx_chan = ComMgr_GetRxSelect();
-    if ((rx_chan == RX_CHANNEL_SUM || rx_chan == RX_CHANNEL_DIFF) && (pulse_idx == (ACCUMULATION_PULSES - 1U)))
+    if ((pulse_idx == (ACCUMULATION_PULSES - 1U)) && (rx_chan == RX_CHANNEL_SUM || rx_chan == RX_CHANNEL_DIFF))
     {
 #ifdef SHOW_SAMPLING_LOG
         t_send_start = DWT->CYCCNT;
@@ -433,7 +493,7 @@ static void Receiver_SendDSPLog(uint32_t t_start, uint32_t t_read_start, uint32_
                                  uint32_t t_bpf_start, uint32_t t_bpf_end, uint32_t t_demod_start, uint32_t t_demod_end,
                                  uint32_t t_mfilt_start, uint32_t t_mfilt_end,
                                  bool sent, uint32_t t_send_start, uint32_t t_send_end,
-                                 uint32_t t_accum_cycles)
+                                 uint32_t t_accum_cycles, uint32_t t_detect_cycles)
 {
     uint32_t t_end = DWT->CYCCNT;
 
@@ -454,6 +514,7 @@ static void Receiver_SendDSPLog(uint32_t t_start, uint32_t t_read_start, uint32_
         uint32_t mfilt_cycles = t_mfilt_end - t_mfilt_start;
         uint32_t send_cycles = sent ? (t_send_end - t_send_start) : 0U;
         uint32_t accum_cycles = t_accum_cycles;
+        uint32_t detect_cycles = t_detect_cycles;
 
         uint32_t total_us = total_cycles / clock_mhz;
         uint32_t read_us = read_cycles / clock_mhz;
@@ -462,6 +523,7 @@ static void Receiver_SendDSPLog(uint32_t t_start, uint32_t t_read_start, uint32_
         uint32_t mfilt_us = mfilt_cycles / clock_mhz;
         uint32_t send_us = send_cycles / clock_mhz;
         uint32_t accum_us = accum_cycles / clock_mhz;
+        uint32_t detect_us = detect_cycles / clock_mhz;
 
         uint8_t dsp_frame[DSP_FRAME_SIZE];
         dsp_frame[0] = 'D';
@@ -474,7 +536,7 @@ static void Receiver_SendDSPLog(uint32_t t_start, uint32_t t_read_start, uint32_
         dsp_frame[6] = (uint8_t)((log_counter >> 16U) & 0xFFU);
         dsp_frame[7] = (uint8_t)((log_counter >> 24U) & 0xFFU);
 
-        uint32_t values[DSP_VALUE_COUNT] = { total_us, read_us, bpf_us, demod_us, mfilt_us, send_us, accum_us };
+        uint32_t values[DSP_VALUE_COUNT] = { total_us, read_us, bpf_us, demod_us, mfilt_us, send_us, accum_us, detect_us };
         for (uint32_t v = 0U; v < DSP_VALUE_COUNT; v++)
         {
             for (uint32_t b = 0U; b < 4U; b++)
@@ -584,6 +646,12 @@ void Receiver_Process(void)
 
     Receiver_AccumulateAndProcess();
 
+    // Gọi nhận diện và truyền thông tin mục tiêu trực tiếp từ Receiver_Process sau khi hoàn tất tích lũy xung thứ 8
+    if (pulse_idx == 0U)
+    {
+        Receiver_DetectAndSendTargets();
+    }
+
     if (active_has_frame)
     {
 #ifdef SHOW_SAMPLING_LOG
@@ -599,6 +667,6 @@ void Receiver_Process(void)
 #ifdef SHOW_SAMPLING_LOG
     Receiver_SendDSPLog(t_start, t_read_start, t_read_end, t_bpf_start, t_bpf_end, 
                         t_demod_start, t_demod_end, t_mfilt_start, t_mfilt_end, sent, t_send_start, t_send_end,
-                        t_accum_cycles);
+                        t_accum_cycles, t_detect_cycles);
 #endif
 }
