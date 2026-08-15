@@ -45,6 +45,38 @@ static __attribute__((aligned(4))) int16_t raw_active_buffer[FRAME_SAMPLES];
 static __attribute__((aligned(4))) Complex_t complex_buffers[2][FRAME_SAMPLES];
 static __attribute__((aligned(4))) Complex_t compressed_buffers[2][FRAME_SAMPLES];
 
+// 8-cycle slow time complex sum accumulation buffer
+static __attribute__((aligned(4))) Complex_t slow_time_accumulation[8][FRAME_SAMPLES];
+// Real sum and diff accumulation buffers (fixed-point uint32_t)
+static uint32_t accumulated_sum_real[FRAME_SAMPLES];
+static uint32_t accumulated_diff_real[FRAME_SAMPLES];
+static uint32_t pulse_idx = 0U;
+
+// Fast integer square root
+static uint32_t int_sqrt(uint32_t x)
+{
+    uint32_t res = 0;
+    uint32_t bit = 1UL << 30;
+    while (bit > x)
+    {
+        bit >>= 2;
+    }
+    while (bit != 0)
+    {
+        if (x >= res + bit)
+        {
+            x -= res + bit;
+            res = (res >> 1) + bit;
+        }
+        else
+        {
+            res >>= 1;
+        }
+        bit >>= 2;
+    }
+    return res;
+}
+
 #ifdef SHOW_SAMPLING_LOG
 static uint32_t log_counter = 0U;
 #endif
@@ -235,6 +267,31 @@ Complex_t* Receiver_GetComplexBuffer(uint32_t channel)
     return NULL;
 }
 
+static void Receiver_SendAccumulatedFrame(uint32_t rx_chan)
+{
+    // Write channel ID to the 4th byte of the header ('0' for Rx Sum, '3' for Rx Diff)
+    receiver_frame[3] = (uint8_t)('0' + rx_chan);
+    int16_t *dest_payload = (int16_t *)&receiver_frame[FRAME_HEADER_SIZE];
+    
+    if (rx_chan == 0U)
+    {
+        for (uint32_t i = 0U; i < FRAME_SAMPLES; i++)
+        {
+            dest_payload[i] = (int16_t)(accumulated_sum_real[i] >> 3); // Average over 8 pulses
+        }
+    }
+    else if (rx_chan == 3U)
+    {
+        for (uint32_t i = 0U; i < FRAME_SAMPLES; i++)
+        {
+            dest_payload[i] = (int16_t)(accumulated_diff_real[i] >> 3); // Average over 8 pulses
+        }
+    }
+    
+    // Gửi gói tin qua ComMgr
+    ComMgr_SendData(receiver_frame, sizeof(receiver_frame));
+}
+
 // Gửi frame dữ liệu của kênh đang chọn dựa trên chế độ truyền tải (Stream Mode)
 static void Receiver_SendActiveFrame(uint32_t rx_chan, int16_t *buffers[2])
 {
@@ -282,6 +339,65 @@ static void Receiver_SendActiveFrame(uint32_t rx_chan, int16_t *buffers[2])
     
     // Gửi gói tin hoàn chỉnh qua UART/USB qua ComMgr
     ComMgr_SendData(receiver_frame, sizeof(receiver_frame));
+}
+
+static void Receiver_AccumulateAndProcess(uint32_t rx_chan, bool *sent, uint32_t *t_send_start, uint32_t *t_send_end)
+{
+    if (pulse_idx == 0U)
+    {
+        memset(accumulated_sum_real, 0, sizeof(accumulated_sum_real));
+        memset(accumulated_diff_real, 0, sizeof(accumulated_diff_real));
+    }
+
+    for (uint32_t i = 0U; i < FRAME_SAMPLES; i++)
+    {
+        // Safe type-punned union to avoid strict-aliasing rules
+        union { Complex_t c; int32_t val; } u_rx1, u_rx2, u_sum;
+        u_rx1.c = compressed_buffers[0][i];
+        u_rx2.c = compressed_buffers[1][i];
+        int32_t packed_rx1 = u_rx1.val;
+        int32_t packed_rx2 = u_rx2.val;
+
+        // SIMD sum and diff of 16-bit packed components
+        int32_t sum_packed = __SADD16(packed_rx1, packed_rx2);
+        int32_t diff_packed = __SSUB16(packed_rx1, packed_rx2);
+
+        // Store complex sum to slow time accumulation buffer
+        u_sum.val = sum_packed;
+        slow_time_accumulation[pulse_idx][i] = u_sum.c;
+
+        // Compute squared magnitudes using SIMD __SMLAD (re^2 + im^2)
+        int32_t sum_norm = __SMLAD(sum_packed, sum_packed, 0);
+        int32_t diff_norm = __SMLAD(diff_packed, diff_packed, 0);
+
+        // Accumulate integer magnitudes using fast int_sqrt
+        accumulated_sum_real[i] += int_sqrt(sum_norm);
+        accumulated_diff_real[i] += int_sqrt(diff_norm);
+    }
+
+    // If Rx Sum (RX_CHANNEL_SUM) or Rx Diff (RX_CHANNEL_DIFF) is selected, send frame ONLY on the 8th pulse
+    if ((rx_chan == RX_CHANNEL_SUM || rx_chan == RX_CHANNEL_DIFF) && (pulse_idx == 7U))
+    {
+#ifdef SHOW_SAMPLING_LOG
+        if (t_send_start)
+        {
+            *t_send_start = DWT->CYCCNT;
+        }
+#endif
+        Receiver_SendAccumulatedFrame(rx_chan);
+#ifdef SHOW_SAMPLING_LOG
+        if (t_send_end)
+        {
+            *t_send_end = DWT->CYCCNT;
+        }
+        if (sent)
+        {
+            *sent = true;
+        }
+#endif
+    }
+
+    pulse_idx = (pulse_idx + 1) % 8U;
 }
 
 #ifdef SHOW_SAMPLING_LOG
@@ -435,6 +551,15 @@ void Receiver_Process(void)
 #endif
     bool sent = false;
 
+    if (has_frame[0] && has_frame[1])
+    {
+#ifdef SHOW_SAMPLING_LOG
+        Receiver_AccumulateAndProcess(rx_chan, &sent, &t_send_start, &t_send_end);
+#else
+        Receiver_AccumulateAndProcess(rx_chan, NULL, NULL, NULL);
+#endif
+    }
+
     if (active_has_frame)
     {
 #ifdef SHOW_SAMPLING_LOG
@@ -443,8 +568,8 @@ void Receiver_Process(void)
         Receiver_SendActiveFrame(rx_chan, buffers);
 #ifdef SHOW_SAMPLING_LOG
         t_send_end = DWT->CYCCNT;
-#endif
         sent = true;
+#endif
     }
 
 #ifdef SHOW_SAMPLING_LOG
