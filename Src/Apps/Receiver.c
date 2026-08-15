@@ -23,7 +23,7 @@
 #define FALLBACK_CLOCK_MHZ     250U
 
 #define DSP_HEADER_SIZE        8U
-#define DSP_VALUE_COUNT        6U
+#define DSP_VALUE_COUNT        7U
 #define DSP_FRAME_SIZE         (DSP_HEADER_SIZE + (DSP_VALUE_COUNT * 4U))
 
 typedef struct {
@@ -47,10 +47,11 @@ static __attribute__((aligned(4))) Complex_t compressed_buffers[2][FRAME_SAMPLES
 
 // 8-cycle slow time complex sum accumulation buffer
 static __attribute__((aligned(4))) Complex_t slow_time_accumulation[8][FRAME_SAMPLES];
-// Real sum and diff accumulation buffers (fixed-point uint32_t)
-static uint32_t accumulated_sum_real[FRAME_SAMPLES];
-static uint32_t accumulated_diff_real[FRAME_SAMPLES];
+// Real sum and diff norm accumulation buffers (fixed-point uint32_t)
+static uint32_t accumulated_sum_norm[FRAME_SAMPLES];
+static uint32_t accumulated_diff_norm[FRAME_SAMPLES];
 static uint32_t pulse_idx = 0U;
+static bool cached_has_frame[2] = {false, false};
 
 // Fast integer square root
 static uint32_t int_sqrt(uint32_t x)
@@ -277,14 +278,14 @@ static void Receiver_SendAccumulatedFrame(uint32_t rx_chan)
     {
         for (uint32_t i = 0U; i < FRAME_SAMPLES; i++)
         {
-            dest_payload[i] = (int16_t)(accumulated_sum_real[i] >> 3); // Average over 8 pulses
+            dest_payload[i] = (int16_t)int_sqrt(accumulated_sum_norm[i] >> 3); // sqrt of average energy
         }
     }
     else if (rx_chan == 3U)
     {
         for (uint32_t i = 0U; i < FRAME_SAMPLES; i++)
         {
-            dest_payload[i] = (int16_t)(accumulated_diff_real[i] >> 3); // Average over 8 pulses
+            dest_payload[i] = (int16_t)int_sqrt(accumulated_diff_norm[i] >> 3); // sqrt of average energy
         }
     }
     
@@ -341,13 +342,17 @@ static void Receiver_SendActiveFrame(uint32_t rx_chan, int16_t *buffers[2])
     ComMgr_SendData(receiver_frame, sizeof(receiver_frame));
 }
 
-static void Receiver_AccumulateAndProcess(uint32_t rx_chan, bool *sent, uint32_t *t_send_start, uint32_t *t_send_end)
+static void Receiver_AccumulateAndProcess(uint32_t rx_chan, bool *sent, uint32_t *t_send_start, uint32_t *t_send_end, uint32_t *t_accum_cycles)
 {
     if (pulse_idx == 0U)
     {
-        memset(accumulated_sum_real, 0, sizeof(accumulated_sum_real));
-        memset(accumulated_diff_real, 0, sizeof(accumulated_diff_real));
+        memset(accumulated_sum_norm, 0, sizeof(accumulated_sum_norm));
+        memset(accumulated_diff_norm, 0, sizeof(accumulated_diff_norm));
     }
+
+#ifdef SHOW_SAMPLING_LOG
+    uint32_t loop_start = DWT->CYCCNT;
+#endif
 
     for (uint32_t i = 0U; i < FRAME_SAMPLES; i++)
     {
@@ -370,10 +375,18 @@ static void Receiver_AccumulateAndProcess(uint32_t rx_chan, bool *sent, uint32_t
         int32_t sum_norm = __SMLAD(sum_packed, sum_packed, 0);
         int32_t diff_norm = __SMLAD(diff_packed, diff_packed, 0);
 
-        // Accumulate integer magnitudes using fast int_sqrt
-        accumulated_sum_real[i] += int_sqrt(sum_norm);
-        accumulated_diff_real[i] += int_sqrt(diff_norm);
+        // Accumulate squared magnitudes directly (fast additions)
+        accumulated_sum_norm[i] += (uint32_t)sum_norm;
+        accumulated_diff_norm[i] += (uint32_t)diff_norm;
     }
+
+#ifdef SHOW_SAMPLING_LOG
+    uint32_t loop_end = DWT->CYCCNT;
+    if (t_accum_cycles)
+    {
+        *t_accum_cycles = loop_end - loop_start;
+    }
+#endif
 
     // If Rx Sum (RX_CHANNEL_SUM) or Rx Diff (RX_CHANNEL_DIFF) is selected, send frame ONLY on the 8th pulse
     if ((rx_chan == RX_CHANNEL_SUM || rx_chan == RX_CHANNEL_DIFF) && (pulse_idx == 7U))
@@ -401,19 +414,18 @@ static void Receiver_AccumulateAndProcess(uint32_t rx_chan, bool *sent, uint32_t
 }
 
 #ifdef SHOW_SAMPLING_LOG
-static void Receiver_SendDSPLog(bool has_frame[2], uint32_t t_start, uint32_t t_read_start, uint32_t t_read_end, 
+static void Receiver_SendDSPLog(uint32_t t_start, uint32_t t_read_start, uint32_t t_read_end, 
                                  uint32_t t_bpf_start, uint32_t t_bpf_end, uint32_t t_demod_start, uint32_t t_demod_end,
                                  uint32_t t_mfilt_start, uint32_t t_mfilt_end,
-                                 bool sent, uint32_t t_send_start, uint32_t t_send_end)
+                                 bool sent, uint32_t t_send_start, uint32_t t_send_end,
+                                 uint32_t t_accum_cycles)
 {
     uint32_t t_end = DWT->CYCCNT;
 
-    if (has_frame[0] || has_frame[1])
+    log_counter++;
+    if (log_counter >= LOG_INTERVAL_FRAMES)
     {
-        log_counter++;
-        if (log_counter >= LOG_INTERVAL_FRAMES)
-        {
-            log_counter = 0U; // Đã khôi phục câu lệnh reset biến đếm log
+        log_counter = 0U; // Đã khôi phục câu lệnh reset biến đếm log
             uint32_t clock_mhz = SystemCoreClock / 1000000U;
             if (clock_mhz == 0U)
             {
@@ -426,6 +438,7 @@ static void Receiver_SendDSPLog(bool has_frame[2], uint32_t t_start, uint32_t t_
             uint32_t demod_cycles = t_demod_end - t_demod_start;
             uint32_t mfilt_cycles = t_mfilt_end - t_mfilt_start;
             uint32_t send_cycles = sent ? (t_send_end - t_send_start) : 0U;
+            uint32_t accum_cycles = t_accum_cycles;
 
             uint32_t total_us = total_cycles / clock_mhz;
             uint32_t read_us = read_cycles / clock_mhz;
@@ -433,6 +446,7 @@ static void Receiver_SendDSPLog(bool has_frame[2], uint32_t t_start, uint32_t t_
             uint32_t demod_us = demod_cycles / clock_mhz;
             uint32_t mfilt_us = mfilt_cycles / clock_mhz;
             uint32_t send_us = send_cycles / clock_mhz;
+            uint32_t accum_us = accum_cycles / clock_mhz;
 
             // Sắp xếp bản tin nhị phân gửi đi
             uint8_t dsp_frame[DSP_FRAME_SIZE];
@@ -448,7 +462,7 @@ static void Receiver_SendDSPLog(bool has_frame[2], uint32_t t_start, uint32_t t_
             dsp_frame[7] = (uint8_t)((log_counter >> 24U) & 0xFFU);
 
             // Ghi các giá trị payload (mỗi giá trị 4 bytes)
-            uint32_t values[DSP_VALUE_COUNT] = { total_us, read_us, bpf_us, demod_us, mfilt_us, send_us };
+            uint32_t values[DSP_VALUE_COUNT] = { total_us, read_us, bpf_us, demod_us, mfilt_us, send_us, accum_us };
             for (uint32_t v = 0U; v < DSP_VALUE_COUNT; v++)
             {
                 for (uint32_t b = 0U; b < 4U; b++)
@@ -460,7 +474,6 @@ static void Receiver_SendDSPLog(bool has_frame[2], uint32_t t_start, uint32_t t_
             ComMgr_SendData(dsp_frame, sizeof(dsp_frame));
         }
     }
-}
 #endif
 
 void Receiver_Init(void)
@@ -483,10 +496,23 @@ void Receiver_Process(void)
     uint32_t t_read_start = DWT->CYCCNT;
 #endif
 
-    bool has_frame[2] = {
-        ADCService_ReadFrame(1U, adc1_frame_buffer),
-        ADCService_ReadFrame(2U, adc2_frame_buffer)
-    };
+    if (!cached_has_frame[0])
+    {
+        cached_has_frame[0] = ADCService_ReadFrame(1U, adc1_frame_buffer);
+    }
+    if (!cached_has_frame[1])
+    {
+        cached_has_frame[1] = ADCService_ReadFrame(2U, adc2_frame_buffer);
+    }
+
+    if (!cached_has_frame[0] || !cached_has_frame[1])
+    {
+        return;
+    }
+
+    // Tiêu thụ các frame đã cache
+    cached_has_frame[0] = false;
+    cached_has_frame[1] = false;
 
 #ifdef SHOW_SAMPLING_LOG
     uint32_t t_read_end = DWT->CYCCNT;
@@ -495,7 +521,7 @@ void Receiver_Process(void)
 
     int16_t *buffers[2] = { adc1_frame_buffer, adc2_frame_buffer };
     uint32_t rx_chan = ComMgr_GetRxSelect();
-    bool active_has_frame = (rx_chan >= 1U && rx_chan <= 2U && has_frame[rx_chan - 1U]);
+    bool active_has_frame = (rx_chan >= 1U && rx_chan <= 2U);
 
     // Lưu lại tín hiệu thô trước khi lọc BPF cho kênh đang chọn
     if (active_has_frame)
@@ -506,10 +532,7 @@ void Receiver_Process(void)
     // Luôn tiến hành lọc BPF đầy đủ trên cả 2 kênh để tính toán thời gian DSP chuẩn xác
     for (uint32_t i = 0U; i < 2U; i++)
     {
-        if (has_frame[i])
-        {
-            Receiver_FilterBPF(buffers[i], FRAME_SAMPLES, &bpf_states[i]);
-        }
+        Receiver_FilterBPF(buffers[i], FRAME_SAMPLES, &bpf_states[i]);
     }
 
 #ifdef SHOW_SAMPLING_LOG
@@ -520,10 +543,7 @@ void Receiver_Process(void)
     // Luôn luôn thực hiện IQ Demodulate trên cả 2 kênh
     for (uint32_t i = 0U; i < 2U; i++)
     {
-        if (has_frame[i])
-        {
-            Receiver_IQDemodulate(buffers[i], complex_buffers[i], FRAME_SAMPLES);
-        }
+        Receiver_IQDemodulate(buffers[i], complex_buffers[i], FRAME_SAMPLES);
     }
 
 #ifdef SHOW_SAMPLING_LOG
@@ -535,10 +555,7 @@ void Receiver_Process(void)
     Transmitter_PulseType pulse_type = Transmitter_GetPulseType();
     for (uint32_t i = 0U; i < 2U; i++)
     {
-        if (has_frame[i])
-        {
-            Receiver_MatchedFilter(complex_buffers[i], compressed_buffers[i], FRAME_SAMPLES, pulse_type);
-        }
+        Receiver_MatchedFilter(complex_buffers[i], compressed_buffers[i], FRAME_SAMPLES, pulse_type);
     }
 
 #ifdef SHOW_SAMPLING_LOG
@@ -548,17 +565,15 @@ void Receiver_Process(void)
 #ifdef SHOW_SAMPLING_LOG
     uint32_t t_send_start = 0U;
     uint32_t t_send_end = 0U;
+    uint32_t t_accum_cycles = 0U;
 #endif
     bool sent = false;
 
-    if (has_frame[0] && has_frame[1])
-    {
 #ifdef SHOW_SAMPLING_LOG
-        Receiver_AccumulateAndProcess(rx_chan, &sent, &t_send_start, &t_send_end);
+    Receiver_AccumulateAndProcess(rx_chan, &sent, &t_send_start, &t_send_end, &t_accum_cycles);
 #else
-        Receiver_AccumulateAndProcess(rx_chan, NULL, NULL, NULL);
+    Receiver_AccumulateAndProcess(rx_chan, NULL, NULL, NULL, NULL);
 #endif
-    }
 
     if (active_has_frame)
     {
@@ -573,7 +588,8 @@ void Receiver_Process(void)
     }
 
 #ifdef SHOW_SAMPLING_LOG
-    Receiver_SendDSPLog(has_frame, t_start, t_read_start, t_read_end, t_bpf_start, t_bpf_end, 
-                        t_demod_start, t_demod_end, t_mfilt_start, t_mfilt_end, sent, t_send_start, t_send_end);
+    Receiver_SendDSPLog(t_start, t_read_start, t_read_end, t_bpf_start, t_bpf_end, 
+                        t_demod_start, t_demod_end, t_mfilt_start, t_mfilt_end, sent, t_send_start, t_send_end,
+                        t_accum_cycles);
 #endif
 }
