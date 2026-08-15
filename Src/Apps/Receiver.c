@@ -58,19 +58,73 @@ static uint32_t int_sqrt(uint32_t val)
     return g;
 }
 
-// Bộ lọc giải điều chế IQ tối ưu hóa cho fs = 4f sử dụng fixed point
-static void Receiver_IQDemodulate(const int16_t *input, Complex_t *output, uint32_t length)
+static void Receiver_FilterBPF(int16_t *buffer, uint32_t length, BPF_State_t *state)
 {
+    // Load state into local registers to avoid RAM access inside loop
+    int32_t sx1 = state->x1;
+    int32_t sx2 = state->x2;
+    int32_t sy1 = state->y1;
+    int32_t sy2 = state->y2;
+
     for (uint32_t i = 0U; i < length; i++)
     {
-        // Zero-centered values
-        int32_t v0 = (int32_t)input[i] - ADC_BIAS;
-        int32_t v1 = (i >= 1U) ? ((int32_t)input[i-1] - ADC_BIAS) : 0;
-        int32_t v2 = (i >= 2U) ? ((int32_t)input[i-2] - ADC_BIAS) : 0;
-        int32_t v3 = (i >= 3U) ? ((int32_t)input[i-3] - ADC_BIAS) : 0;
+        // Loại bỏ DC bias
+        int32_t x_q16 = ((int32_t)buffer[i] - ADC_BIAS) << 16;
 
-        int16_t A = (int16_t)((v0 - v2) >> 2);
-        int16_t B = (int16_t)((v1 - v3) >> 2);
+        // Phương trình sai phân: y[n] = (x[n] - x[n-2]) / 8 - 0.75 * y[n-2]
+        int32_t diff_x = x_q16 - sx2;
+        int32_t term1 = diff_x >> BPF_GAIN_SHIFT;
+        int32_t term2 = sy2 - (sy2 >> BPF_FEEDBACK_SHIFT);
+        int32_t y_q16 = term1 - term2;
+
+        // Cập nhật trạng thái lịch sử
+        sx2 = sx1;
+        sx1 = x_q16;
+
+        sy2 = sy1;
+        sy1 = y_q16;
+
+        // Đưa về dạng 12-bit nguyên bản và cộng lại DC bias
+        int32_t bp = (y_q16 >> 16) + ADC_BIAS;
+
+        // Giới hạn trong dải ADC 12-bit [0, 4095]
+        if (bp > ADC_MAX_VAL)
+        {
+            bp = ADC_MAX_VAL;
+        }
+        else if (bp < 0)
+        {
+            bp = 0;
+        }
+
+        buffer[i] = (int16_t)bp;
+    }
+
+    // Save state back to RAM
+    state->x1 = sx1;
+    state->x2 = sx2;
+    state->y1 = sy1;
+    state->y2 = sy2;
+}
+
+// Bộ lọc giải điều chế IQ tối ưu hóa sử dụng thanh ghi dịch (Shift Register) để tránh load lại bộ nhớ và rẽ nhánh
+static void Receiver_IQDemodulate(const int16_t *input, Complex_t *output, uint32_t length)
+{
+    int32_t v0 = 0;
+    int32_t v1 = 0;
+    int32_t v2 = 0;
+    int32_t v3 = 0;
+
+    for (uint32_t i = 0U; i < length; i++)
+    {
+        // Cập nhật thanh ghi dịch
+        v3 = v2;
+        v2 = v1;
+        v1 = v0;
+        v0 = (int32_t)input[i] - ADC_BIAS;
+
+        int32_t A = (v0 - v2) >> 2;
+        int32_t B = (v1 - v3) >> 2;
 
         int16_t I = 0;
         int16_t Q = 0;
@@ -78,20 +132,20 @@ static void Receiver_IQDemodulate(const int16_t *input, Complex_t *output, uint3
         switch (i & 3U)
         {
             case 0U:
-                I = A;
-                Q = -B;
+                I = (int16_t)A;
+                Q = (int16_t)(-B);
                 break;
             case 1U:
-                I = B;
-                Q = -A;
+                I = (int16_t)B;
+                Q = (int16_t)(-A);
                 break;
             case 2U:
-                I = -A;
-                Q = B;
+                I = (int16_t)(-A);
+                Q = (int16_t)B;
                 break;
             case 3U:
-                I = -B;
-                Q = A;
+                I = (int16_t)(-B);
+                Q = (int16_t)A;
                 break;
         }
 
@@ -109,43 +163,7 @@ Complex_t* Receiver_GetComplexBuffer(uint32_t channel)
     return NULL;
 }
 
-// Bộ lọc thông dải IIR bậc 2 dải thông 35 kHz - 45 kHz (tại FS = 160 kHz)
-static void Receiver_FilterBPF(int16_t *buffer, uint32_t length, BPF_State_t *state)
-{
-    for (uint32_t i = 0U; i < length; i++)
-    {
-        // Loại bỏ DC bias
-        int32_t x_q16 = ((int32_t)buffer[i] - ADC_BIAS) << 16;
 
-        // Phương trình sai phân: y[n] = (x[n] - x[n-2]) / 8 - 0.75 * y[n-2]
-        int32_t diff_x = x_q16 - (state->x2);
-        int32_t term1 = diff_x >> BPF_GAIN_SHIFT;
-        int32_t term2 = (state->y2) - ((state->y2) >> BPF_FEEDBACK_SHIFT);
-        int32_t y_q16 = term1 - term2;
-
-        // Cập nhật trạng thái lịch sử
-        state->x2 = state->x1;
-        state->x1 = x_q16;
-
-        state->y2 = state->y1;
-        state->y1 = y_q16;
-
-        // Đưa về dạng 12-bit nguyên bản và cộng lại DC bias
-        int32_t bp = (y_q16 >> 16) + ADC_BIAS;
-
-        // Giới hạn trong dải ADC 12-bit [0, 4095]
-        if (bp > ADC_MAX_VAL)
-        {
-            bp = ADC_MAX_VAL;
-        }
-        else if (bp < 0)
-        {
-            bp = 0;
-        }
-
-        buffer[i] = (int16_t)bp;
-    }
-}
 
 void Receiver_Init(void)
 {
@@ -230,26 +248,37 @@ void Receiver_Process(void)
 #endif
         receiver_frame[3] = (uint8_t)('0' + rx_chan);
         StreamMode_t mode = ComMgr_GetStreamMode();
-        for (uint32_t i = 0U; i < FRAME_SAMPLES; i++)
+        if (mode == STREAM_MODE_DEMOD)
         {
-            int16_t val;
-            if (mode == STREAM_MODE_DEMOD)
+            const Complex_t *chan_buf = complex_buffers[rx_chan - 1U];
+            for (uint32_t i = 0U; i < FRAME_SAMPLES; i++)
             {
-                int32_t re = (int32_t)complex_buffers[rx_chan - 1U][i].re;
-                int32_t im = (int32_t)complex_buffers[rx_chan - 1U][i].im;
-                val = (int16_t)int_sqrt(re * re + im * im);
+                int32_t re = (int32_t)chan_buf[i].re;
+                int32_t im = (int32_t)chan_buf[i].im;
+                uint32_t norm = (uint32_t)re * (uint32_t)re + (uint32_t)im * (uint32_t)im;
+                int16_t val = (int16_t)int_sqrt(norm);
+                receiver_frame[FRAME_HEADER_SIZE + i * 2] = (uint8_t)(val & 0xFF);
+                receiver_frame[FRAME_HEADER_SIZE + i * 2 + 1] = (uint8_t)((val >> 8) & 0xFF);
             }
-            else if (mode == STREAM_MODE_BPF)
+        }
+        else if (mode == STREAM_MODE_BPF)
+        {
+            const int16_t *send_buffer = buffers[rx_chan - 1U];
+            for (uint32_t i = 0U; i < FRAME_SAMPLES; i++)
             {
-                val = buffers[rx_chan - 1U][i];
+                int16_t val = send_buffer[i];
+                receiver_frame[FRAME_HEADER_SIZE + i * 2] = (uint8_t)(val & 0xFF);
+                receiver_frame[FRAME_HEADER_SIZE + i * 2 + 1] = (uint8_t)((val >> 8) & 0xFF);
             }
-            else
+        }
+        else
+        {
+            for (uint32_t i = 0U; i < FRAME_SAMPLES; i++)
             {
-                val = raw_active_buffer[i];
+                int16_t val = raw_active_buffer[i];
+                receiver_frame[FRAME_HEADER_SIZE + i * 2] = (uint8_t)(val & 0xFF);
+                receiver_frame[FRAME_HEADER_SIZE + i * 2 + 1] = (uint8_t)((val >> 8) & 0xFF);
             }
-            // Copy 16-bit values into byte array (little-endian)
-            receiver_frame[FRAME_HEADER_SIZE + i * 2] = (uint8_t)(val & 0xFF);
-            receiver_frame[FRAME_HEADER_SIZE + i * 2 + 1] = (uint8_t)((val >> 8) & 0xFF);
         }
         ComMgr_SendData(receiver_frame, sizeof(receiver_frame));
 #ifdef SHOW_SAMPLING_LOG
