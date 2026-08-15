@@ -35,7 +35,16 @@ void ComMgr_SendData(void const *data, uint32_t length);
 // Lấy kênh Rx được chọn từ SonarViewer
 uint32_t ComMgr_GetRxSelect(void);
 
+typedef enum {
+    STREAM_MODE_RAW = 0,
+    STREAM_MODE_BPF = 1,
+    STREAM_MODE_DEMOD = 2
+} StreamMode_t;
+
 // Kiểm tra bộ lọc BPF có đang được bật hay không
 uint8_t ComMgr_IsBpfEnabled(void);
+
+// Lấy chế độ stream hiện tại
+StreamMode_t ComMgr_GetStreamMode(void);
 
 #endif /* __COMMGR_H */

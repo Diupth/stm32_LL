@@ -17,7 +17,7 @@ static uint32_t tx_queue_tail;                 // Vị trí đọc dữ liệu c
 static char rx_command[32];
 static uint32_t rx_command_length;
 static uint32_t rx_select = 0; // Mặc định không gửi (Rx 0)
-static volatile uint8_t bpf_enabled = 1U; // Mặc định bật BPF (volatile để tránh tối ưu hóa ngắt)
+static volatile StreamMode_t stream_mode = STREAM_MODE_BPF; // Mặc định bật BPF (volatile để tránh tối ưu hóa ngắt)
 
 // Tính số byte hiện đang chờ trong queue.
 static uint32_t ComMgr_TxQueued(void)
@@ -140,11 +140,15 @@ void tud_cdc_rx_cb(uint8_t itf)
       }
       else if (strcmp(rx_command, "mode:raw") == 0)
       {
-        bpf_enabled = 0U;
+        stream_mode = STREAM_MODE_RAW;
       }
       else if (strcmp(rx_command, "mode:bpf") == 0)
       {
-        bpf_enabled = 1U;
+        stream_mode = STREAM_MODE_BPF;
+      }
+      else if (strcmp(rx_command, "mode:demod") == 0 || strcmp(rx_command, "mode:demodulated") == 0)
+      {
+        stream_mode = STREAM_MODE_DEMOD;
       }
       rx_command_length = 0U;
     }
@@ -166,7 +170,12 @@ uint32_t ComMgr_GetRxSelect(void)
 
 uint8_t ComMgr_IsBpfEnabled(void)
 {
-    return bpf_enabled;
+    return (stream_mode == STREAM_MODE_BPF);
+}
+
+StreamMode_t ComMgr_GetStreamMode(void)
+{
+    return stream_mode;
 }
 
 void ComMgr_SendData(void const *data, uint32_t length)
