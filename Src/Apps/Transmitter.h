@@ -8,6 +8,7 @@ typedef enum {
 
 void Transmitter_Init(void);
 void Transmitter_SetPulseType(Transmitter_PulseType pulse_type);
+Transmitter_PulseType Transmitter_GetPulseType(void);
 #ifdef SIMULATION_MODE
 void Transmitter_UpdateNoise(void);
 #endif

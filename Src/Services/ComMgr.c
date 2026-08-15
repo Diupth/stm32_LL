@@ -150,6 +150,10 @@ void tud_cdc_rx_cb(uint8_t itf)
       {
         stream_mode = STREAM_MODE_DEMOD;
       }
+      else if (strcmp(rx_command, "mode:compressed") == 0)
+      {
+        stream_mode = STREAM_MODE_COMPRESSED;
+      }
       rx_command_length = 0U;
     }
     else if (rx_command_length < sizeof(rx_command) - 1U)

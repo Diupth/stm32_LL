@@ -165,7 +165,14 @@ void Transmitter_Init(void) {
                   TRANSMITTER_SAMPLE_COUNT);
 }
 
+static volatile Transmitter_PulseType current_pulse_type = TRANSMITTER_PULSE_SINGLE;
+
+Transmitter_PulseType Transmitter_GetPulseType(void) {
+  return current_pulse_type;
+}
+
 void Transmitter_SetPulseType(Transmitter_PulseType pulse_type) {
+  current_pulse_type = pulse_type;
   const uint16_t *src = NULL;
 #ifdef SIMULATION_MODE
   uint32_t active_length = 0U;

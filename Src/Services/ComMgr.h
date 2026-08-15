@@ -38,7 +38,8 @@ uint32_t ComMgr_GetRxSelect(void);
 typedef enum {
     STREAM_MODE_RAW = 0,
     STREAM_MODE_BPF = 1,
-    STREAM_MODE_DEMOD = 2
+    STREAM_MODE_DEMOD = 2,
+    STREAM_MODE_COMPRESSED = 3
 } StreamMode_t;
 
 // Kiểm tra bộ lọc BPF có đang được bật hay không
