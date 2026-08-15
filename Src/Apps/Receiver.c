@@ -53,6 +53,13 @@ static uint32_t accumulated_diff_norm[FRAME_SAMPLES];
 static uint32_t pulse_idx = 0U;
 static bool cached_has_frame[2] = {false, false};
 
+#ifdef SHOW_SAMPLING_LOG
+static uint32_t t_send_start = 0U;
+static uint32_t t_send_end = 0U;
+static uint32_t t_accum_cycles = 0U;
+static bool sent = false;
+#endif
+
 // Fast integer square root
 static uint32_t int_sqrt(uint32_t x)
 {
@@ -85,7 +92,7 @@ static uint32_t log_counter = 0U;
 
 
 
-static void Receiver_FilterBPF(int16_t *buffer, uint32_t length, BPF_State_t *state)
+static void Receiver_FilterBPF(int16_t *buffer, BPF_State_t *state)
 {
     // Load state into local registers to avoid RAM access inside loop
     int32_t sx1 = state->x1;
@@ -93,7 +100,7 @@ static void Receiver_FilterBPF(int16_t *buffer, uint32_t length, BPF_State_t *st
     int32_t sy1 = state->y1;
     int32_t sy2 = state->y2;
 
-    for (uint32_t i = 0U; i < length; i += 2U)
+    for (uint32_t i = 0U; i < FRAME_SAMPLES; i += 2U)
     {
         // Mẫu 0 (i + 0)
         int32_t x_q16_0 = ((int32_t)buffer[i] - ADC_BIAS) << 16;
@@ -146,14 +153,14 @@ static void Receiver_FilterBPF(int16_t *buffer, uint32_t length, BPF_State_t *st
 }
 
 // Bộ lọc giải điều chế IQ tối ưu hóa sử dụng thanh ghi dịch (Shift Register) để tránh load lại bộ nhớ và rẽ nhánh
-static void Receiver_IQDemodulate(const int16_t *input, Complex_t *output, uint32_t length)
+static void Receiver_IQDemodulate(const int16_t *input, Complex_t *output)
 {
     int32_t v0 = 0;
     int32_t v1 = 0;
     int32_t v2 = 0;
     int32_t v3 = 0;
 
-    for (uint32_t i = 0U; i < length; i += 4U)
+    for (uint32_t i = 0U; i < FRAME_SAMPLES; i += 4U)
     {
         // Mẫu i
         v3 = v2;
@@ -189,7 +196,7 @@ static void Receiver_IQDemodulate(const int16_t *input, Complex_t *output, uint3
     }
 }
 
-static void Receiver_MatchedFilter(const Complex_t * restrict input, Complex_t * restrict output, uint32_t length, Transmitter_PulseType pulse_type)
+static void Receiver_MatchedFilter(const Complex_t * restrict input, Complex_t * restrict output)
 {
     static int32_t S_packed[FRAME_SAMPLES];
     int32_t sum_packed = 0;
@@ -203,12 +210,14 @@ static void Receiver_MatchedFilter(const Complex_t * restrict input, Complex_t *
         sum_packed = __SADD16(sum_packed, in_ptr[i]);
         s_ptr[i] = sum_packed;
     }
-    for (uint32_t i = 8U; i < length; i++)
+    for (uint32_t i = 8U; i < FRAME_SAMPLES; i++)
     {
         sum_packed = __SADD16(sum_packed, in_ptr[i]);
         sum_packed = __SSUB16(sum_packed, in_ptr[i - 8U]);
         s_ptr[i] = sum_packed;
     }
+
+    Transmitter_PulseType pulse_type = Transmitter_GetPulseType();
 
     if (pulse_type == TRANSMITTER_PULSE_BARKER13)
     {
@@ -220,7 +229,7 @@ static void Receiver_MatchedFilter(const Complex_t * restrict input, Complex_t *
             output[i].re = 0;
             output[i].im = 0;
         }
-        for (uint32_t i = 103U; i < length; i++)
+        for (uint32_t i = 103U; i < FRAME_SAMPLES; i++)
         {
             int32_t acc = s_ptr[i];
             acc = __SSUB16(acc, s_ptr[i - 8U]);
@@ -249,7 +258,7 @@ static void Receiver_MatchedFilter(const Complex_t * restrict input, Complex_t *
             output[i].re = 0;
             output[i].im = 0;
         }
-        for (uint32_t i = 7U; i < length; i++)
+        for (uint32_t i = 7U; i < FRAME_SAMPLES; i++)
         {
             int32_t acc = s_ptr[i];
             output[i].re = (int16_t)((int16_t)acc >> 3);
@@ -268,8 +277,9 @@ Complex_t* Receiver_GetComplexBuffer(uint32_t channel)
     return NULL;
 }
 
-static void Receiver_SendAccumulatedFrame(uint32_t rx_chan)
+static void Receiver_SendAccumulatedFrame(void)
 {
+    uint32_t rx_chan = ComMgr_GetRxSelect();
     // Write channel ID to the 4th byte of the header ('0' for Rx Sum, '3' for Rx Diff)
     receiver_frame[3] = (uint8_t)('0' + rx_chan);
     int16_t *dest_payload = (int16_t *)&receiver_frame[FRAME_HEADER_SIZE];
@@ -278,14 +288,14 @@ static void Receiver_SendAccumulatedFrame(uint32_t rx_chan)
     {
         for (uint32_t i = 0U; i < FRAME_SAMPLES; i++)
         {
-            dest_payload[i] = (int16_t)int_sqrt(accumulated_sum_norm[i] >> 3); // sqrt of average energy
+            dest_payload[i] = (int16_t)(accumulated_sum_norm[i] >> 14); // Scale down energy to fit in int16_t without overflow
         }
     }
     else if (rx_chan == 3U)
     {
         for (uint32_t i = 0U; i < FRAME_SAMPLES; i++)
         {
-            dest_payload[i] = (int16_t)int_sqrt(accumulated_diff_norm[i] >> 3); // sqrt of average energy
+            dest_payload[i] = (int16_t)(accumulated_diff_norm[i] >> 14); // Scale down energy to fit in int16_t without overflow
         }
     }
     
@@ -294,15 +304,16 @@ static void Receiver_SendAccumulatedFrame(uint32_t rx_chan)
 }
 
 // Gửi frame dữ liệu của kênh đang chọn dựa trên chế độ truyền tải (Stream Mode)
-static void Receiver_SendActiveFrame(uint32_t rx_chan, int16_t *buffers[2])
+static void Receiver_SendActiveFrame(void)
 {
+    uint32_t rx_chan = ComMgr_GetRxSelect();
     // Ghi số hiệu kênh nhận (1 hoặc 2) vào byte thứ 4 của header
     receiver_frame[3] = (uint8_t)('0' + rx_chan);
     StreamMode_t mode = ComMgr_GetStreamMode();
 
     if (mode == STREAM_MODE_COMPRESSED)
     {
-        // Chế độ Compressed: Tính biên độ tín hiệu phức từ bộ lọc tương thích (Magnitude = sqrt(I^2 + Q^2))
+        // Chế độ Compressed: Gửi năng lượng bình phương phức từ bộ lọc tương thích (dịch phải 12 bit)
         const Complex_t *chan_buf = compressed_buffers[rx_chan - 1U];
         int16_t *dest_payload = (int16_t *)&receiver_frame[FRAME_HEADER_SIZE];
         for (uint32_t i = 0U; i < FRAME_SAMPLES; i++)
@@ -310,12 +321,12 @@ static void Receiver_SendActiveFrame(uint32_t rx_chan, int16_t *buffers[2])
             // Sử dụng SIMD lệnh __SMLAD để nhân song song 16-bit và cộng dồn trong 1 chu kỳ máy
             int32_t packed_val = *(const int32_t *)&chan_buf[i];
             int32_t norm = __SMLAD(packed_val, packed_val, 0);
-            dest_payload[i] = (int16_t)sqrtf((float)norm);
+            dest_payload[i] = (int16_t)(norm >> 12);
         }
     }
     else if (mode == STREAM_MODE_DEMOD)
     {
-        // Chế độ IQ Demodulation: Tính biên độ tín hiệu phức (Magnitude = sqrt(I^2 + Q^2))
+        // Chế độ IQ Demodulation: Gửi năng lượng bình phương phức giải điều chế (dịch phải 12 bit)
         const Complex_t *chan_buf = complex_buffers[rx_chan - 1U];
         int16_t *dest_payload = (int16_t *)&receiver_frame[FRAME_HEADER_SIZE];
         for (uint32_t i = 0U; i < FRAME_SAMPLES; i++)
@@ -323,13 +334,13 @@ static void Receiver_SendActiveFrame(uint32_t rx_chan, int16_t *buffers[2])
             // Sử dụng SIMD lệnh __SMLAD để nhân song song 16-bit và cộng dồn trong 1 chu kỳ máy
             int32_t packed_val = *(const int32_t *)&chan_buf[i];
             int32_t norm = __SMLAD(packed_val, packed_val, 0);
-            dest_payload[i] = (int16_t)sqrtf((float)norm);
+            dest_payload[i] = (int16_t)(norm >> 12);
         }
     }
     else if (mode == STREAM_MODE_BPF)
     {
-        // Chế độ Bandpass Filter: Gửi trực tiếp tín hiệu đã qua bộ lọc BPF
-        const int16_t *send_buffer = buffers[rx_chan - 1U];
+        // Chế độ Bandpass Filter: Gửi trực tiếp tín hiệu đã qua bộ lọc BPF từ static buffer
+        const int16_t *send_buffer = (rx_chan == 1U) ? adc1_frame_buffer : adc2_frame_buffer;
         memcpy(&receiver_frame[FRAME_HEADER_SIZE], send_buffer, FRAME_SAMPLES * sizeof(int16_t));
     }
     else
@@ -342,7 +353,7 @@ static void Receiver_SendActiveFrame(uint32_t rx_chan, int16_t *buffers[2])
     ComMgr_SendData(receiver_frame, sizeof(receiver_frame));
 }
 
-static void Receiver_AccumulateAndProcess(uint32_t rx_chan, bool *sent, uint32_t *t_send_start, uint32_t *t_send_end, uint32_t *t_accum_cycles)
+static void Receiver_AccumulateAndProcess(void)
 {
     if (pulse_idx == 0U)
     {
@@ -382,31 +393,20 @@ static void Receiver_AccumulateAndProcess(uint32_t rx_chan, bool *sent, uint32_t
 
 #ifdef SHOW_SAMPLING_LOG
     uint32_t loop_end = DWT->CYCCNT;
-    if (t_accum_cycles)
-    {
-        *t_accum_cycles = loop_end - loop_start;
-    }
+    t_accum_cycles = loop_end - loop_start;
 #endif
 
+    uint32_t rx_chan = ComMgr_GetRxSelect();
     // If Rx Sum (RX_CHANNEL_SUM) or Rx Diff (RX_CHANNEL_DIFF) is selected, send frame ONLY on the 8th pulse
     if ((rx_chan == RX_CHANNEL_SUM || rx_chan == RX_CHANNEL_DIFF) && (pulse_idx == 7U))
     {
 #ifdef SHOW_SAMPLING_LOG
-        if (t_send_start)
-        {
-            *t_send_start = DWT->CYCCNT;
-        }
+        t_send_start = DWT->CYCCNT;
 #endif
-        Receiver_SendAccumulatedFrame(rx_chan);
+        Receiver_SendAccumulatedFrame();
 #ifdef SHOW_SAMPLING_LOG
-        if (t_send_end)
-        {
-            *t_send_end = DWT->CYCCNT;
-        }
-        if (sent)
-        {
-            *sent = true;
-        }
+        t_send_end = DWT->CYCCNT;
+        sent = true;
 #endif
     }
 
@@ -532,7 +532,7 @@ void Receiver_Process(void)
     // Luôn tiến hành lọc BPF đầy đủ trên cả 2 kênh để tính toán thời gian DSP chuẩn xác
     for (uint32_t i = 0U; i < 2U; i++)
     {
-        Receiver_FilterBPF(buffers[i], FRAME_SAMPLES, &bpf_states[i]);
+        Receiver_FilterBPF(buffers[i], &bpf_states[i]);
     }
 
 #ifdef SHOW_SAMPLING_LOG
@@ -543,7 +543,7 @@ void Receiver_Process(void)
     // Luôn luôn thực hiện IQ Demodulate trên cả 2 kênh
     for (uint32_t i = 0U; i < 2U; i++)
     {
-        Receiver_IQDemodulate(buffers[i], complex_buffers[i], FRAME_SAMPLES);
+        Receiver_IQDemodulate(buffers[i], complex_buffers[i]);
     }
 
 #ifdef SHOW_SAMPLING_LOG
@@ -552,10 +552,9 @@ void Receiver_Process(void)
 #endif
 
     // Luôn luôn thực hiện Matched Filter trên cả 2 kênh
-    Transmitter_PulseType pulse_type = Transmitter_GetPulseType();
     for (uint32_t i = 0U; i < 2U; i++)
     {
-        Receiver_MatchedFilter(complex_buffers[i], compressed_buffers[i], FRAME_SAMPLES, pulse_type);
+        Receiver_MatchedFilter(complex_buffers[i], compressed_buffers[i]);
     }
 
 #ifdef SHOW_SAMPLING_LOG
@@ -563,24 +562,20 @@ void Receiver_Process(void)
 #endif
 
 #ifdef SHOW_SAMPLING_LOG
-    uint32_t t_send_start = 0U;
-    uint32_t t_send_end = 0U;
-    uint32_t t_accum_cycles = 0U;
+    t_send_start = 0U;
+    t_send_end = 0U;
+    t_accum_cycles = 0U;
+    sent = false;
 #endif
-    bool sent = false;
 
-#ifdef SHOW_SAMPLING_LOG
-    Receiver_AccumulateAndProcess(rx_chan, &sent, &t_send_start, &t_send_end, &t_accum_cycles);
-#else
-    Receiver_AccumulateAndProcess(rx_chan, NULL, NULL, NULL, NULL);
-#endif
+    Receiver_AccumulateAndProcess();
 
     if (active_has_frame)
     {
 #ifdef SHOW_SAMPLING_LOG
         t_send_start = DWT->CYCCNT;
 #endif
-        Receiver_SendActiveFrame(rx_chan, buffers);
+        Receiver_SendActiveFrame();
 #ifdef SHOW_SAMPLING_LOG
         t_send_end = DWT->CYCCNT;
         sent = true;
