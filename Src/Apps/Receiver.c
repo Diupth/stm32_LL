@@ -102,41 +102,30 @@ static void Receiver_FilterBPF(int16_t *buffer, BPF_State_t *state)
 
     for (uint32_t i = 0U; i < FRAME_SAMPLES; i += 2U)
     {
+        // Load two 16-bit samples in a single 32-bit read instruction
+        int32_t samples = *(const int32_t *)&buffer[i];
+        int32_t sample0 = (int32_t)((int16_t)samples);
+        int32_t sample1 = (int32_t)((int16_t)(samples >> 16));
+
         // Mẫu 0 (i + 0)
-        int32_t x_q16_0 = ((int32_t)buffer[i] - ADC_BIAS) << 16;
+        int32_t x_q16_0 = (sample0 - ADC_BIAS) << 16;
         int32_t diff_x_0 = x_q16_0 - sx2;
         int32_t term1_0 = diff_x_0 >> BPF_GAIN_SHIFT;
         int32_t term2_0 = sy2 - (sy2 >> BPF_FEEDBACK_SHIFT);
         int32_t y_q16_0 = term1_0 - term2_0;
 
         int32_t bp_0 = (y_q16_0 >> 16) + ADC_BIAS;
-        if (bp_0 > ADC_MAX_VAL)
-        {
-            bp_0 = ADC_MAX_VAL;
-        }
-        else if (bp_0 < 0)
-        {
-            bp_0 = 0;
-        }
-        buffer[i] = (int16_t)bp_0;
+        buffer[i] = (int16_t)__USAT(bp_0, 12);
 
         // Mẫu 1 (i + 1)
-        int32_t x_q16_1 = ((int32_t)buffer[i + 1] - ADC_BIAS) << 16;
+        int32_t x_q16_1 = (sample1 - ADC_BIAS) << 16;
         int32_t diff_x_1 = x_q16_1 - sx1;
         int32_t term1_1 = diff_x_1 >> BPF_GAIN_SHIFT;
         int32_t term2_1 = sy1 - (sy1 >> BPF_FEEDBACK_SHIFT);
         int32_t y_q16_1 = term1_1 - term2_1;
 
         int32_t bp_1 = (y_q16_1 >> 16) + ADC_BIAS;
-        if (bp_1 > ADC_MAX_VAL)
-        {
-            bp_1 = ADC_MAX_VAL;
-        }
-        else if (bp_1 < 0)
-        {
-            bp_1 = 0;
-        }
-        buffer[i + 1] = (int16_t)bp_1;
+        buffer[i + 1] = (int16_t)__USAT(bp_1, 12);
 
         // Cập nhật trạng thái lịch sử
         sx2 = x_q16_0;
@@ -204,50 +193,59 @@ static void Receiver_MatchedFilter(const Complex_t * restrict input, Complex_t *
     const int32_t * restrict in_ptr = (const int32_t *)input;
     int32_t * restrict s_ptr = S_packed;
 
-    // Tính tổng dịch chuyển (moving sum) của 8 mẫu cho cả phần thực và ảo song song dùng SIMD
+    // Tính tổng dịch chuyển (moving sum) của 8 mẫu cho cả phần thực và ảo song song dùng SIMD và con trỏ
     for (uint32_t i = 0U; i < 8U; i++)
     {
         sum_packed = __SADD16(sum_packed, in_ptr[i]);
         s_ptr[i] = sum_packed;
     }
+    
+    const int32_t *p_in = in_ptr + 8U;
+    const int32_t *p_in_prev = in_ptr;
+    int32_t *p_out = s_ptr + 8U;
     for (uint32_t i = 8U; i < FRAME_SAMPLES; i++)
     {
-        sum_packed = __SADD16(sum_packed, in_ptr[i]);
-        sum_packed = __SSUB16(sum_packed, in_ptr[i - 8U]);
-        s_ptr[i] = sum_packed;
+        sum_packed = __SADD16(sum_packed, *p_in++);
+        sum_packed = __SSUB16(sum_packed, *p_in_prev++);
+        *p_out++ = sum_packed;
     }
 
     Transmitter_PulseType pulse_type = Transmitter_GetPulseType();
 
     if (pulse_type == TRANSMITTER_PULSE_BARKER13)
     {
-        // 13 chíp Barker, mỗi chíp dài 8 mẫu. 
-        // Lọc tương thích hoàn toàn dùng phép cộng/trừ với mã Barker-13 đảo thời gian:
-        // +1, -1, +1, -1, +1, +1, -1, -1, +1, +1, +1, +1, +1
+        // Zero-initialize the prefix
         for (uint32_t i = 0U; i < 103U; i++)
         {
             output[i].re = 0;
             output[i].im = 0;
         }
+
+        // Single base pointer with constant negative offsets to avoid both register spilling and index math
+        const int32_t *p = &s_ptr[103U];
+        Complex_t *out = &output[103U];
+
         for (uint32_t i = 103U; i < FRAME_SAMPLES; i++)
         {
-            int32_t acc = s_ptr[i];
-            acc = __SSUB16(acc, s_ptr[i - 8U]);
-            acc = __SADD16(acc, s_ptr[i - 16U]);
-            acc = __SSUB16(acc, s_ptr[i - 24U]);
-            acc = __SADD16(acc, s_ptr[i - 32U]);
-            acc = __SADD16(acc, s_ptr[i - 40U]);
-            acc = __SSUB16(acc, s_ptr[i - 48U]);
-            acc = __SSUB16(acc, s_ptr[i - 56U]);
-            acc = __SADD16(acc, s_ptr[i - 64U]);
-            acc = __SADD16(acc, s_ptr[i - 72U]);
-            acc = __SADD16(acc, s_ptr[i - 80U]);
-            acc = __SADD16(acc, s_ptr[i - 88U]);
-            acc = __SADD16(acc, s_ptr[i - 96U]);
+            int32_t acc = p[0];
+            acc = __SSUB16(acc, p[-8]);
+            acc = __SADD16(acc, p[-16]);
+            acc = __SSUB16(acc, p[-24]);
+            acc = __SADD16(acc, p[-32]);
+            acc = __SADD16(acc, p[-40]);
+            acc = __SSUB16(acc, p[-48]);
+            acc = __SSUB16(acc, p[-56]);
+            acc = __SADD16(acc, p[-64]);
+            acc = __SADD16(acc, p[-72]);
+            acc = __SADD16(acc, p[-80]);
+            acc = __SADD16(acc, p[-88]);
+            acc = __SADD16(acc, p[-96]);
 
-            // Shift right by 3 (scale down / 8) cho cả Re và Im đóng gói trong 32-bit int
-            output[i].re = (int16_t)((int16_t)acc >> 3);
-            output[i].im = (int16_t)((int16_t)(acc >> 16) >> 3);
+            out->re = (int16_t)((int16_t)acc >> 3);
+            out->im = (int16_t)((int16_t)(acc >> 16) >> 3);
+            
+            p++;
+            out++;
         }
     }
     else
@@ -514,11 +512,6 @@ void Receiver_Process(void)
     cached_has_frame[0] = false;
     cached_has_frame[1] = false;
 
-#ifdef SHOW_SAMPLING_LOG
-    uint32_t t_read_end = DWT->CYCCNT;
-    uint32_t t_bpf_start = DWT->CYCCNT;
-#endif
-
     int16_t *buffers[2] = { adc1_frame_buffer, adc2_frame_buffer };
     uint32_t rx_chan = ComMgr_GetRxSelect();
     bool active_has_frame = (rx_chan >= 1U && rx_chan <= 2U);
@@ -528,6 +521,11 @@ void Receiver_Process(void)
     {
         memcpy(raw_active_buffer, buffers[rx_chan - 1U], FRAME_SAMPLES * sizeof(int16_t));
     }
+
+#ifdef SHOW_SAMPLING_LOG
+    uint32_t t_read_end = DWT->CYCCNT;
+    uint32_t t_bpf_start = t_read_end;
+#endif
 
     // Luôn tiến hành lọc BPF đầy đủ trên cả 2 kênh để tính toán thời gian DSP chuẩn xác
     for (uint32_t i = 0U; i < 2U; i++)
