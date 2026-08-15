@@ -1,5 +1,7 @@
 #include "ADCService.h"
 #include "stm32h5xx.h"
+#include <string.h>
+
 
 // ADC acquisition service.
 // - PA0 is configured as analog input.
@@ -266,9 +268,9 @@ static bool ADCService_CommonRead(
     *ready_mask &= ~buffer_bit;
     __enable_irq();
 
-    for (uint32_t i = 0U; i < ADC_HALF_BUFFER_SIZE; i++)
+    if (dest != NULL)
     {
-        dest[i] = (int16_t)double_buffer[offset + i];
+        memcpy(dest, &double_buffer[offset], ADC_HALF_BUFFER_SIZE * sizeof(uint16_t));
     }
 
     return true;
