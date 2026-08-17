@@ -23,7 +23,7 @@
 
 // DSP Filter Constants
 #define BPF_GAIN_SHIFT                3U
-#define BPF_FEEDBACK_SHIFT            2U
+#define BPF_FEEDBACK_Q15              18219
 #define BPF_SAMPLES_PER_ITER          2U
 
 #define IQ_DEMOD_SAMPLES_PER_ITER     4U
@@ -138,7 +138,8 @@ static void Receiver_FilterBPF(int16_t *buffer, BPF_State_t *state)
         int32_t x_q16_0 = (sample0 - ADC_BIAS) << 16;
         int32_t diff_x_0 = x_q16_0 - sx2;
         int32_t term1_0 = diff_x_0 >> BPF_GAIN_SHIFT;
-        int32_t term2_0 = sy2 - (sy2 >> BPF_FEEDBACK_SHIFT);
+        int32_t term2_0 = sy2 -
+                  (int32_t)(((int64_t)sy2 * BPF_FEEDBACK_Q15) >> 15);
         int32_t y_q16_0 = term1_0 - term2_0;
 
         int32_t bp_0 = (y_q16_0 >> 16) + ADC_BIAS;
@@ -148,7 +149,8 @@ static void Receiver_FilterBPF(int16_t *buffer, BPF_State_t *state)
         int32_t x_q16_1 = (sample1 - ADC_BIAS) << 16;
         int32_t diff_x_1 = x_q16_1 - sx1;
         int32_t term1_1 = diff_x_1 >> BPF_GAIN_SHIFT;
-        int32_t term2_1 = sy1 - (sy1 >> BPF_FEEDBACK_SHIFT);
+        int32_t term2_1 = sy1 -
+                  (int32_t)(((int64_t)sy1 * BPF_FEEDBACK_Q15) >> 15);
         int32_t y_q16_1 = term1_1 - term2_1;
 
         int32_t bp_1 = (y_q16_1 >> 16) + ADC_BIAS;
