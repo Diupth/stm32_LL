@@ -136,11 +136,25 @@ static void ADCService_CommonInit(
     // Single-ended calibration
     adc->CR &= ~ADC_CR_ADCALDIF;
     adc->CR |= ADC_CR_ADCAL;
-    while (adc->CR & ADC_CR_ADCAL) {}
+    uint32_t wait_start = HAL_GetTick();
+    while (adc->CR & ADC_CR_ADCAL)
+    {
+        if ((HAL_GetTick() - wait_start) > 10U)
+        {
+            return;
+        }
+    }
 
     // Enable ADC
     adc->CR |= ADC_CR_ADEN;
-    while (!(adc->ISR & ADC_ISR_ADRDY)) {}
+    wait_start = HAL_GetTick();
+    while (!(adc->ISR & ADC_ISR_ADRDY))
+    {
+        if ((HAL_GetTick() - wait_start) > 10U)
+        {
+            return;
+        }
+    }
 
     // Configure Rank 1 for channel, L=0 (1 conversion)
     adc->SQR1 = (channel << ADC_SQR1_SQ1_Pos) | (0U << ADC_SQR1_L_Pos);
