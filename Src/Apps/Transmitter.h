@@ -4,7 +4,7 @@
 typedef enum
 {
 	TRANSMITTER_PULSE_SINGLE = 0U,
-	TRANSMITTER_PULSE_BARKER13
+	TRANSMITTER_PULSE_LFM
 } Transmitter_PulseType;
 
 void Transmitter_Init(void);

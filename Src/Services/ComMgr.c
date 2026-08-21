@@ -125,9 +125,9 @@ void tud_cdc_rx_cb(uint8_t itf)
     if (character == '\n' || character == '\r')
     {
       rx_command[rx_command_length] = '\0';
-      if (strcmp(rx_command, "cfg:barker13") == 0)
+      if (strcmp(rx_command, "cfg:lfm") == 0 || strcmp(rx_command, "cfg:barker13") == 0)
       {
-        Transmitter_SetPulseType(TRANSMITTER_PULSE_BARKER13);
+        Transmitter_SetPulseType(TRANSMITTER_PULSE_LFM);
       }
       else if (strcmp(rx_command, "cfg:single") == 0)
       {
