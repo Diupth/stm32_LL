@@ -16,6 +16,10 @@
 #define TRANSMITTER_LFM_F1 41000.0f
 #define TRANSMITTER_LFM_AMPLITUDE 2000.0f
 
+#ifdef SIMULATION_MODE
+#define TRANSMITTER_SIMULATION_DELAY 1000U
+#endif
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846f
 #endif
@@ -89,12 +93,30 @@ void Transmitter_SetPulseType(Transmitter_PulseType pulse_type)
 
     if (src != NULL)
     {
+#ifdef SIMULATION_MODE
+        /* Đặt phần đầu trước delay về mức BIAS */
+        for (uint32_t n = 0U; n < TRANSMITTER_SIMULATION_DELAY; n++)
+        {
+            transmitter_samples[n] = TRANSMITTER_BIAS;
+        }
+
+        /* Chép phần tín hiệu xung sau độ trễ */
+        (void)memcpy((void *)&transmitter_samples[TRANSMITTER_SIMULATION_DELAY], src, active_length * sizeof(uint16_t));
+
+        /* Đặt phần còn lại về mức trung vị BIAS */
+        for (uint32_t n = TRANSMITTER_SIMULATION_DELAY + active_length; n < TRANSMITTER_SAMPLE_COUNT; n++)
+        {
+            transmitter_samples[n] = TRANSMITTER_BIAS;
+        }
+#else
         /* Chép phần tín hiệu xung ngắn */
         (void)memcpy((void *)transmitter_samples, src, active_length * sizeof(uint16_t));
+
         /* Đặt phần còn lại về mức trung vị BIAS */
         for (uint32_t n = active_length; n < TRANSMITTER_SAMPLE_COUNT; n++)
         {
             transmitter_samples[n] = TRANSMITTER_BIAS;
         }
+#endif
     }
 }
