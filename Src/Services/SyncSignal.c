@@ -147,9 +147,9 @@ void SyncSignal_SendSamplingLog(uint32_t counter) {
   uint32_t adc2_pri_us = ADCService_GetFramePeriodUs(2U);
   uint32_t dac_pri_us = DACService_GetFramePeriodUs();
 
-  uint32_t adc1_fs_hz = adc1_pri_us == 0U ? 0U : (2048U * 1000000U) / adc1_pri_us;
-  uint32_t adc2_fs_hz = adc2_pri_us == 0U ? 0U : (2048U * 1000000U) / adc2_pri_us;
-  uint32_t dac_fs_hz = dac_pri_us == 0U ? 0U : (2048U * 1000000U) / dac_pri_us;
+  uint32_t adc1_fs_hz = adc1_pri_us == 0U ? 0U : (ADC_FRAME_SAMPLE_COUNT * 1000000U) / adc1_pri_us;
+  uint32_t adc2_fs_hz = adc2_pri_us == 0U ? 0U : (ADC_FRAME_SAMPLE_COUNT * 1000000U) / adc2_pri_us;
+  uint32_t dac_fs_hz = dac_pri_us == 0U ? 0U : (DAC_SAMPLE_COUNT * 1000000U) / dac_pri_us;
 
   uint32_t values[] = {adc1_fs_hz, adc1_pri_us, adc2_fs_hz, adc2_pri_us, dac_fs_hz, dac_pri_us};
   for (uint32_t i = 0U; i < 6U; i++) {

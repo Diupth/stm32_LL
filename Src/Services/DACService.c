@@ -71,7 +71,7 @@ void DACService_Init(const uint16_t *samples, uint32_t sample_count)
     GPDMA1_Channel1->CSAR = (uint32_t)samples;
     GPDMA1_Channel1->CDAR = (uint32_t)&(DAC1->DHR12R1);
 
-    // CBR1: Số byte cần truyền trong 1 chu kỳ = 2048 mẫu * 2 bytes/mẫu = 4096 bytes
+    // CBR1: Số byte cần truyền trong 1 chu kỳ = 4096 mẫu * 2 bytes/mẫu = 8192 bytes
     GPDMA1_Channel1->CBR1 = sample_count * 2U;
 
     // 5. Cài đặt nút LLI để tự động lặp lại (Circular Mode) trỏ ngược về chính nó

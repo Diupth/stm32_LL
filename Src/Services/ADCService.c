@@ -5,12 +5,12 @@
 // - PA0 is configured as analog input.
 // - ADC1 converts samples at a fixed trigger rate from TIM6 TRGO.
 // - GPDMA transfers converted values continuously into a circular double buffer.
-// - Each half of the buffer represents one complete frame of 2048 samples.
+// - Each half of the buffer represents one complete frame of 4096 samples.
 
-#define ADC_HALF_BUFFER_SIZE 2048U
+#define ADC_HALF_BUFFER_SIZE ADC_FRAME_SAMPLE_COUNT
 #define ADC_DOUBLE_BUFFER_SIZE (ADC_HALF_BUFFER_SIZE * 2U)
 
-// Double buffer: 2 x 2048 samples, used as a ping-pong circular DMA target.
+// Double buffer: 2 x 4096 samples, used as a ping-pong circular DMA target.
 __attribute__((aligned(32))) static uint16_t adc_double_buffers[2][ADC_DOUBLE_BUFFER_SIZE];
 
 static volatile uint32_t adc_completed_counts[2] = {0U, 0U};
@@ -298,7 +298,7 @@ void GPDMA1_Channel0_IRQHandler(void)
     uint32_t csr = GPDMA1_Channel0->CSR;
 
     // DMA raises HTF when the first half-buffer is filled and TCF when the second half is filled.
-    // This allows the application to read a stable 2048-sample frame without stopping the ADC.
+    // This allows the application to read a stable 4096-sample frame without stopping the ADC.
     if (csr & DMA_CSR_HTF)
     {
         // Clear half-transfer flag.

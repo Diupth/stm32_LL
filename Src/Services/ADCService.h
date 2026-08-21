@@ -4,9 +4,11 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#define ADC_FRAME_SAMPLE_COUNT 4096U
+
 // ADC service for sampling an analog input using ADC + DMA.
-// The ADC continuously fills a 4096-sample double buffer in circular mode.
-// Each half-buffer represents one 2048-sample frame, which can be read by the caller.
+// The ADC continuously fills an 8192-sample double buffer in circular mode.
+// Each half-buffer represents one 4096-sample frame, which can be read by the caller.
 
 void ADCService_Init(uint32_t adc_index);
 

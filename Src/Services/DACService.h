@@ -3,8 +3,10 @@
 
 #include <stdint.h>
 
+#define DAC_SAMPLE_COUNT 4096U
+
 // DAC service for outputting a precomputed waveform through DAC1 Channel 1.
-// The waveform is stored in a 2048-sample buffer and replayed continuously by DMA.
+// The waveform is stored in a 4096-sample buffer and replayed continuously by DMA.
 
 void DACService_Init(const uint16_t *samples, uint32_t sample_count);
 
