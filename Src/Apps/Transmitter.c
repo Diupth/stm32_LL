@@ -74,42 +74,45 @@ static volatile uint16_t transmitter_samples[TRANSMITTER_SAMPLE_COUNT]
     __attribute__((aligned(32)));
 
 #ifdef SIMULATION_MODE
-static uint32_t noise_seed = TRANSMITTER_LCG_INCREMENT;
 static const uint16_t *active_waveform_src = transmitter_single_waveform;
 static uint32_t active_waveform_length = TRANSMITTER_SINGLE_LENGTH;
 
+#if 0
+static uint32_t noise_seed = TRANSMITTER_LCG_INCREMENT;
+
 static int16_t get_random_noise(void) {
-  noise_seed =
-      noise_seed * TRANSMITTER_LCG_MULTIPLIER + TRANSMITTER_LCG_INCREMENT;
-  return (int16_t)((noise_seed >> 16U) & (TRANSMITTER_NOISE_RANGE - 1U)) -
-         TRANSMITTER_NOISE_OFFSET;
+  return 0; /* Temporarily disabled noise */
 }
+#endif
 
 static void fill_samples_with_noise_and_pulse_doppler(const uint16_t *src,
                                                       uint32_t active_length,
                                                       uint32_t delay) {
   uint32_t i = 0U;
 
-  // 1. Noise before pulse (branchless)
+  // 1. Noise before pulse (branchless) -> now flat bias
   for (; i < delay; i++) {
-    transmitter_samples[i] = (uint16_t)(TRANSMITTER_BIAS + get_random_noise());
+    transmitter_samples[i] = TRANSMITTER_BIAS;
   }
 
-  // 2. Active pulse with rise envelope and attenuation + noise (branchless)
+  // 2. Active pulse (now without rise envelope distortion and without noise)
   uint32_t end_pulse = delay + active_length;
   for (; i < end_pulse; i++) {
     uint32_t idx = i - delay;
     int32_t dev = (int32_t)src[idx] - TRANSMITTER_BIAS;
 
+    /* Temporarily disabled rise envelope distortion */
+#if 0
     // Méo trước: rise envelope
     if (idx < TRANSMITTER_RISE_SAMPLES) {
       dev = (dev * (int32_t)idx) >> 2; // dev * idx / 4
     }
+#endif
 
-    // Suy hao
+    // Suy hao (amplitude reduction - kept or not, let's keep it but remove noise)
     dev = dev >> TRANSMITTER_ATTENUATION_SHIFT;
 
-    int32_t val = TRANSMITTER_BIAS + dev + get_random_noise();
+    int32_t val = TRANSMITTER_BIAS + dev;
     if (val < TRANSMITTER_DAC_MIN)
       val = TRANSMITTER_DAC_MIN;
     if (val > TRANSMITTER_DAC_MAX)
@@ -117,7 +120,8 @@ static void fill_samples_with_noise_and_pulse_doppler(const uint16_t *src,
     transmitter_samples[i] = (uint16_t)val;
   }
 
-  // 3. Ringing tail (méo sau / decay tail) + noise (branchless)
+  // 3. Ringing tail (méo sau / decay tail) -> temporarily disabled
+#if 0
   uint32_t end_decay = end_pulse + TRANSMITTER_DECAY_SAMPLES;
   for (; i < end_decay; i++) {
     uint32_t idx = i - end_pulse;
@@ -143,10 +147,11 @@ static void fill_samples_with_noise_and_pulse_doppler(const uint16_t *src,
       val = TRANSMITTER_DAC_MAX;
     transmitter_samples[i] = (uint16_t)val;
   }
+#endif
 
-  // 4. Noise after pulse and tail (branchless)
+  // 4. Noise after pulse and tail (branchless) -> now flat bias
   for (; i < TRANSMITTER_SAMPLE_COUNT; i++) {
-    transmitter_samples[i] = (uint16_t)(TRANSMITTER_BIAS + get_random_noise());
+    transmitter_samples[i] = TRANSMITTER_BIAS;
   }
 }
 #endif
