@@ -1,4 +1,5 @@
 #include "Receiver.h"
+#include <string.h>
 
 #include "ADCService.h"
 #include "ComMgr.h"
@@ -40,12 +41,7 @@ void Receiver_Process(void)
     if (active_buffer != NULL)
     {
         receiver_frame[3] = (uint8_t)('0' + rx_chan);
-        for (uint32_t i = 0U; i < 2048U; i++)
-        {
-            // Copy 16-bit values into byte array (little-endian)
-            receiver_frame[16 + i * 2] = (uint8_t)(active_buffer[i] & 0xFF);
-            receiver_frame[16 + i * 2 + 1] = (uint8_t)((active_buffer[i] >> 8) & 0xFF);
-        }
+        memcpy(&receiver_frame[16], active_buffer, 2048U * sizeof(int16_t));
         ComMgr_SendData(receiver_frame, sizeof(receiver_frame));
     }
 }

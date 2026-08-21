@@ -22,7 +22,7 @@ add_compile_definitions(
 add_definitions(
     -DSHOW_SAMPLING_LOG
     # -DSHOW_ADC_DAC_DEBUG
-    # -DSIMULATION_MODE
+    -DSIMULATION_MODE
 )
 
 # Source files
