@@ -6,7 +6,7 @@
 
 #define TRANSMITTER_SAMPLE_COUNT 2048U
 #define TRANSMITTER_BIAS 2048U
-#define TRANSMITTER_SINGLE_LENGTH 8U
+#define TRANSMITTER_SINGLE_LENGTH 80U
 #define TRANSMITTER_PULSE_HIGH 4048U
 #define TRANSMITTER_PULSE_LOW 48U
 
@@ -20,17 +20,28 @@
 #define M_PI 3.14159265358979323846f
 #endif
 
-static const uint16_t transmitter_single_waveform[TRANSMITTER_SAMPLE_COUNT] = {
-    TRANSMITTER_BIAS, TRANSMITTER_PULSE_HIGH, TRANSMITTER_BIAS, TRANSMITTER_PULSE_LOW,
-    TRANSMITTER_BIAS, TRANSMITTER_PULSE_HIGH, TRANSMITTER_BIAS, TRANSMITTER_PULSE_LOW,
-    [TRANSMITTER_SINGLE_LENGTH ... TRANSMITTER_SAMPLE_COUNT - 1U] = TRANSMITTER_BIAS
-};
+/* Pre-computed short waveform buffers */
+static uint16_t transmitter_single_waveform[TRANSMITTER_SINGLE_LENGTH];
+static uint16_t transmitter_lfm_waveform[TRANSMITTER_LFM_LENGTH];
 
-/* Global buffer computed once in Transmitter_Init */
-static uint16_t transmitter_lfm_waveform[TRANSMITTER_SAMPLE_COUNT];
-
+/* DMA buffer */
 static volatile uint16_t transmitter_samples[TRANSMITTER_SAMPLE_COUNT]
     __attribute__((aligned(32)));
+
+static void Transmitter_GenerateSingleWaveform(void)
+{
+    const uint16_t pattern[4] = {
+        TRANSMITTER_BIAS,
+        TRANSMITTER_PULSE_HIGH,
+        TRANSMITTER_BIAS,
+        TRANSMITTER_PULSE_LOW
+    };
+
+    for (uint32_t n = 0U; n < TRANSMITTER_SINGLE_LENGTH; n++)
+    {
+        transmitter_single_waveform[n] = pattern[n % 4U];
+    }
+}
 
 static void Transmitter_GenerateLfmWaveform(void)
 {
@@ -45,18 +56,15 @@ static void Transmitter_GenerateLfmWaveform(void)
         float sample = (float)TRANSMITTER_BIAS + TRANSMITTER_LFM_AMPLITUDE * sinf(phase);
         transmitter_lfm_waveform[n] = (uint16_t)lroundf(sample);
     }
-
-    for (uint32_t n = TRANSMITTER_LFM_LENGTH; n < TRANSMITTER_SAMPLE_COUNT; n++)
-    {
-        transmitter_lfm_waveform[n] = TRANSMITTER_BIAS;
-    }
 }
 
 void Transmitter_Init(void)
 {
+    Transmitter_GenerateSingleWaveform();
     Transmitter_GenerateLfmWaveform();
 
-    (void)memcpy((void *)transmitter_samples, transmitter_single_waveform, sizeof(transmitter_samples));
+    /* Nạp mặc định xung đơn vào buffer DMA */
+    Transmitter_SetPulseType(TRANSMITTER_PULSE_SINGLE);
 
     DACService_Init((const uint16_t *)transmitter_samples, TRANSMITTER_SAMPLE_COUNT);
 }
@@ -64,20 +72,29 @@ void Transmitter_Init(void)
 void Transmitter_SetPulseType(Transmitter_PulseType pulse_type)
 {
     const uint16_t *src = NULL;
+    uint32_t active_length = 0U;
 
     switch (pulse_type)
     {
         case TRANSMITTER_PULSE_LFM:
             src = transmitter_lfm_waveform;
+            active_length = TRANSMITTER_LFM_LENGTH;
             break;
         case TRANSMITTER_PULSE_SINGLE:
         default:
             src = transmitter_single_waveform;
+            active_length = TRANSMITTER_SINGLE_LENGTH;
             break;
     }
 
     if (src != NULL)
     {
-        (void)memcpy((void *)transmitter_samples, src, sizeof(transmitter_samples));
+        /* Chép phần tín hiệu xung ngắn */
+        (void)memcpy((void *)transmitter_samples, src, active_length * sizeof(uint16_t));
+        /* Đặt phần còn lại về mức trung vị BIAS */
+        for (uint32_t n = active_length; n < TRANSMITTER_SAMPLE_COUNT; n++)
+        {
+            transmitter_samples[n] = TRANSMITTER_BIAS;
+        }
     }
 }
