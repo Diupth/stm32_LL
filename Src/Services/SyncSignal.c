@@ -15,10 +15,10 @@ void SyncSignal_Init(void) {
 
   // 2. Timer configuration:
   // SYSCLK = 240 MHz, APB1 prescaler = 1, so Timer 6 runs from 240 MHz.
-  // Desired sample rate = 160 kHz => period = 1500 timer ticks.
-  // PSC = 0 -> no prescale; ARR = 1500 - 1 = 1499.
+  // Desired sample rate = 96 kHz => period = 2500 timer ticks.
+  // PSC = 0 -> no prescale; ARR = 2500 - 1 = 2499.
   TIM6->PSC = 0U;
-  TIM6->ARR = 1499U;
+  TIM6->ARR = 2499U;
 
   // 3. Configure TRGO output on update event.
   // MMS=2 means: on Update Event, the timer sends an update trigger to slave

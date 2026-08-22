@@ -7,11 +7,11 @@
 #define TRANSMITTER_SAMPLE_COUNT DAC_SAMPLE_COUNT
 #define TRANSMITTER_BIAS 2048U
 #define TRANSMITTER_SINGLE_LENGTH 80U
-#define TRANSMITTER_PULSE_HIGH 4048U
-#define TRANSMITTER_PULSE_LOW 48U
+#define TRANSMITTER_SINGLE_FREQ 40000.0f
+#define TRANSMITTER_SINGLE_AMPLITUDE 2000.0f
 
-#define TRANSMITTER_LFM_LENGTH 640U
-#define TRANSMITTER_FS 160000.0f
+#define TRANSMITTER_LFM_LENGTH 384U
+#define TRANSMITTER_FS 96000.0f
 #define TRANSMITTER_LFM_F0 39000.0f
 #define TRANSMITTER_LFM_F1 41000.0f
 #define TRANSMITTER_LFM_AMPLITUDE 2000.0f
@@ -34,16 +34,14 @@ static volatile uint16_t transmitter_samples[TRANSMITTER_SAMPLE_COUNT]
 
 static void Transmitter_GenerateSingleWaveform(void)
 {
-    const uint16_t pattern[4] = {
-        TRANSMITTER_BIAS,
-        TRANSMITTER_PULSE_HIGH,
-        TRANSMITTER_BIAS,
-        TRANSMITTER_PULSE_LOW
-    };
+    const float two_pi = 2.0f * (float)M_PI;
 
     for (uint32_t n = 0U; n < TRANSMITTER_SINGLE_LENGTH; n++)
     {
-        transmitter_single_waveform[n] = pattern[n % 4U];
+        float t = (float)n / TRANSMITTER_FS;
+        float phase = two_pi * TRANSMITTER_SINGLE_FREQ * t;
+        float sample = (float)TRANSMITTER_BIAS + TRANSMITTER_SINGLE_AMPLITUDE * sinf(phase);
+        transmitter_single_waveform[n] = (uint16_t)lroundf(sample);
     }
 }
 
