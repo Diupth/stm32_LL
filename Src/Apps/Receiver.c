@@ -94,32 +94,39 @@ void Receiver_MatchedFilter(const int16_t *input, int16_t *output)
     }
 }
 
-void Receiver_Process(void)
+static void Receiver_SendFrame(int16_t *const raw_buffers[2], int16_t *const filtered_buffers[2])
 {
     uint32_t rx_select = ComMgr_GetRxSelect();
-    ComMgr_StreamMode mode = ComMgr_GetStreamMode();
+    if (rx_select == 1U || rx_select == 2U)
+    {
+        ComMgr_StreamMode mode = ComMgr_GetStreamMode();
+        const int16_t *send_buf = (mode == COMMGR_STREAM_COMPRESSED)
+                                      ? filtered_buffers[rx_select - 1U]
+                                      : raw_buffers[rx_select - 1U];
+
+        receiver_frame[3] = (uint8_t)('0' + rx_select);
+        memcpy(&receiver_frame[RECEIVER_FRAME_HEADER_SIZE], send_buf, RECEIVER_FRAME_PAYLOAD_SIZE);
+        ComMgr_SendData(receiver_frame, sizeof(receiver_frame));
+    }
+}
+
+void Receiver_Process(void)
+{
     int16_t *adc_buffers[2] = {adc1_frame_buffer, adc2_frame_buffer};
     int16_t *filtered_buffers[2] = {filtered1_frame_buffer, filtered2_frame_buffer};
 
+    /* 1. Thu thập và xử lý Matched Filter song song trên cả 2 kênh */
     for (uint32_t chan = 1U; chan <= 2U; chan++)
     {
         if (ADCService_ReadFrame(chan, adc_buffers[chan - 1U]))
         {
-            /* Luôn thực hiện matched filter trên cả 2 kênh bất kể cấu hình */
             Receiver_MatchedFilter(adc_buffers[chan - 1U], filtered_buffers[chan - 1U]);
-
-            /* Cấu hình chỉ phục vụ mục đích truyền thông lên SonarViewer */
-            if (rx_select == chan)
-            {
-                int16_t *send_buf = (mode == COMMGR_STREAM_COMPRESSED) ? filtered_buffers[chan - 1U] : adc_buffers[chan - 1U];
-
-                receiver_frame[3] = (uint8_t)('0' + chan);
-                memcpy(&receiver_frame[RECEIVER_FRAME_HEADER_SIZE], send_buf, RECEIVER_FRAME_PAYLOAD_SIZE);
-                ComMgr_SendData(receiver_frame, sizeof(receiver_frame));
-            }
-
-            /* Nhường quyền xử lý ngay cho USB CDC truyền dữ liệu và xử lý tud_task */
-            ComMgr_Process();
         }
     }
+
+    /* 2. Gửi tín hiệu theo cấu hình Rx select (1 hoặc 2) và Stream Mode */
+    Receiver_SendFrame(adc_buffers, filtered_buffers);
+
+    /* 3. Xử lý truyền thông USB */
+    ComMgr_Process();
 }
