@@ -5,6 +5,10 @@
 #include "ADCService.h"
 #include "ComMgr.h"
 #include "Transmitter.h"
+#include "SyncSignalApp.h"
+#ifdef SHOW_TIMING_LOG
+#include "DWTService.h"
+#endif
 
 #define RECEIVER_FRAME_HEADER_SIZE 16U
 #define RECEIVER_FRAME_PAYLOAD_SIZE (ADC_FRAME_SAMPLE_COUNT * sizeof(int16_t))
@@ -18,8 +22,52 @@ static int16_t adc2_frame_buffer[ADC_FRAME_SAMPLE_COUNT];
 static int16_t filtered1_frame_buffer[ADC_FRAME_SAMPLE_COUNT];
 static int16_t filtered2_frame_buffer[ADC_FRAME_SAMPLE_COUNT];
 
+#ifdef SHOW_TIMING_LOG
+static uint32_t dsp_log_sequence = 0U;
+static uint32_t last_dsp_log_tick = 0U;
+static uint32_t read_cycles = 0U;
+static uint32_t mfilt_cycles = 0U;
+static uint32_t send_cycles = 0U;
+static uint32_t total_cycles = 0U;
+
+static void Receiver_SendTimingLog(void)
+{
+    uint8_t dsp_frame[40] = {'D', 'S', 'P', '1'};
+    uint32_t bpf_us = 0U;
+    uint32_t demod_us = 0U;
+    uint32_t accum_us = 0U;
+    uint32_t detect_us = 0U;
+
+    uint32_t values[9] = {
+        dsp_log_sequence++,
+        DWTService_CyclesToUs(total_cycles),
+        DWTService_CyclesToUs(read_cycles),
+        bpf_us,
+        demod_us,
+        DWTService_CyclesToUs(mfilt_cycles),
+        DWTService_CyclesToUs(send_cycles),
+        accum_us,
+        detect_us
+    };
+
+    for (uint32_t i = 0U; i < 9U; i++)
+    {
+        for (uint32_t byte = 0U; byte < 4U; byte++)
+        {
+            dsp_frame[4U + i * 4U + byte] = (uint8_t)(values[i] >> (byte * 8U));
+        }
+    }
+
+    ComMgr_SendData(dsp_frame, sizeof(dsp_frame));
+}
+#endif
+
 void Receiver_Init(void)
 {
+#ifdef SHOW_TIMING_LOG
+    DWTService_Init();
+    last_dsp_log_tick = HAL_GetTick();
+#endif
     ADCService_Init(1U);
     ADCService_Init(2U);
 
@@ -112,20 +160,56 @@ static void Receiver_SendFrame(int16_t *const raw_buffers[2], int16_t *const fil
 
 void Receiver_Process(void)
 {
+    /* Kiểm tra và đồng bộ đủ 2 kênh ADC từ SyncSignalApp trước khi bắt đầu xử lý DSP */
+    if (!SyncSignalApp_WaitForFrames())
+    {
+        ComMgr_Process();
+        return;
+    }
+
     int16_t *adc_buffers[2] = {adc1_frame_buffer, adc2_frame_buffer};
     int16_t *filtered_buffers[2] = {filtered1_frame_buffer, filtered2_frame_buffer};
+
+#ifdef SHOW_TIMING_LOG
+    uint32_t t_start = DWTService_GetCycles();
+    read_cycles = 0U;
+    mfilt_cycles = 0U;
+    send_cycles = 0U;
+#endif
 
     /* 1. Thu thập và xử lý Matched Filter song song trên cả 2 kênh */
     for (uint32_t chan = 1U; chan <= 2U; chan++)
     {
-        if (ADCService_ReadFrame(chan, adc_buffers[chan - 1U]))
-        {
-            Receiver_MatchedFilter(adc_buffers[chan - 1U], filtered_buffers[chan - 1U]);
-        }
+#ifdef SHOW_TIMING_LOG
+        uint32_t t_read_start = DWTService_GetCycles();
+#endif
+        ADCService_ReadFrame(chan, adc_buffers[chan - 1U]);
+#ifdef SHOW_TIMING_LOG
+        read_cycles += (DWTService_GetCycles() - t_read_start);
+        uint32_t t_mfilt_start = DWTService_GetCycles();
+#endif
+        Receiver_MatchedFilter(adc_buffers[chan - 1U], filtered_buffers[chan - 1U]);
+#ifdef SHOW_TIMING_LOG
+        mfilt_cycles += (DWTService_GetCycles() - t_mfilt_start);
+#endif
     }
 
     /* 2. Gửi tín hiệu theo cấu hình Rx select (1 hoặc 2) và Stream Mode */
+#ifdef SHOW_TIMING_LOG
+    uint32_t t_send_start = DWTService_GetCycles();
+#endif
     Receiver_SendFrame(adc_buffers, filtered_buffers);
+#ifdef SHOW_TIMING_LOG
+    send_cycles = DWTService_GetCycles() - t_send_start;
+    total_cycles = DWTService_GetCycles() - t_start;
+
+    uint32_t now = HAL_GetTick();
+    if (now - last_dsp_log_tick >= 1000U)
+    {
+        last_dsp_log_tick = now;
+        Receiver_SendTimingLog();
+    }
+#endif
 
     /* 3. Xử lý truyền thông USB */
     ComMgr_Process();

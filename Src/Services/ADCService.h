@@ -24,6 +24,7 @@ uint32_t ADCService_GetRestartCount(uint32_t adc_index);
 uint32_t ADCService_GetLastMinimum(uint32_t adc_index);
 uint32_t ADCService_GetLastMaximum(uint32_t adc_index);
 
+bool ADCService_HasFrame(uint32_t adc_index);
 bool ADCService_ReadFrame(uint32_t adc_index, int16_t *dest);
 
 #ifdef SHOW_SAMPLING_LOG

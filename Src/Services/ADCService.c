@@ -283,6 +283,15 @@ static bool ADCService_CommonRead(
     return true;
 }
 
+bool ADCService_HasFrame(uint32_t adc_index)
+{
+    if (adc_index == 1U || adc_index == 2U)
+    {
+        return ready_buffer_masks[adc_index - 1U] != 0U;
+    }
+    return false;
+}
+
 bool ADCService_ReadFrame(uint32_t adc_index, int16_t *dest)
 {
     if (adc_index == 1U || adc_index == 2U)
