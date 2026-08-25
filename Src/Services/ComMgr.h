@@ -23,6 +23,13 @@ extern tusb_desc_device_t const desc_device;
 extern uint8_t const desc_configuration[];
 extern char const* string_desc_arr[];
 
+typedef enum
+{
+  COMMGR_STREAM_RAW = 0U,
+  COMMGR_STREAM_BPF,
+  COMMGR_STREAM_COMPRESSED
+} ComMgr_StreamMode;
+
 // Khởi tạo phần cứng USB và TinyUSB Stack
 void ComMgr_Init(void);
 
@@ -34,5 +41,8 @@ void ComMgr_SendData(void const *data, uint32_t length);
 
 // Lấy kênh Rx được chọn từ SonarViewer
 uint32_t ComMgr_GetRxSelect(void);
+
+// Lấy chế độ stream tín hiệu (Raw, BPF, Compressed) từ SonarViewer
+ComMgr_StreamMode ComMgr_GetStreamMode(void);
 
 #endif /* __COMMGR_H */

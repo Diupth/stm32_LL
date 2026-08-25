@@ -9,6 +9,10 @@ set(CMAKE_C_EXTENSIONS ON)
 set(CMAKE_PROJECT_NAME Low_layer)
 project(${CMAKE_PROJECT_NAME} C ASM)
 
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+
 # Enable export compile commands for tooling (clangd, etc.)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 

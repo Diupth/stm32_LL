@@ -113,6 +113,8 @@ void ComMgr_Process(void)
     tud_cdc_write_flush();
 }
 
+static ComMgr_StreamMode stream_mode = COMMGR_STREAM_RAW;
+
 void tud_cdc_rx_cb(uint8_t itf)
 {
   (void)itf;
@@ -137,6 +139,18 @@ void tud_cdc_rx_cb(uint8_t itf)
       {
         rx_select = (uint32_t)(rx_command[10] - '0');
       }
+      else if (strcmp(rx_command, "mode:raw") == 0)
+      {
+        stream_mode = COMMGR_STREAM_RAW;
+      }
+      else if (strcmp(rx_command, "mode:bpf") == 0)
+      {
+        stream_mode = COMMGR_STREAM_BPF;
+      }
+      else if (strcmp(rx_command, "mode:compressed") == 0)
+      {
+        stream_mode = COMMGR_STREAM_COMPRESSED;
+      }
       rx_command_length = 0U;
     }
     else if (rx_command_length < sizeof(rx_command) - 1U)
@@ -153,6 +167,11 @@ void tud_cdc_rx_cb(uint8_t itf)
 uint32_t ComMgr_GetRxSelect(void)
 {
     return rx_select;
+}
+
+ComMgr_StreamMode ComMgr_GetStreamMode(void)
+{
+    return stream_mode;
 }
 
 void ComMgr_SendData(void const *data, uint32_t length)

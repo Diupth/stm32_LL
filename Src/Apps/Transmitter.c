@@ -17,13 +17,7 @@
 #define TRANSMITTER_LFM_F1_HZ 41000U
 #define TRANSMITTER_LFM_F0 ((float)TRANSMITTER_LFM_F0_HZ)
 #define TRANSMITTER_LFM_F1 ((float)TRANSMITTER_LFM_F1_HZ)
-
-#define TRANSMITTER_LFM_BANDWIDTH_HZ (TRANSMITTER_LFM_F1_HZ - TRANSMITTER_LFM_F0_HZ)
 #define TRANSMITTER_LFM_AMPLITUDE 2000.0f
-
-#define TRANSMITTER_COMPRESSION_RATIO 6U
-/* Duration T = COMPRESSION_RATIO / BANDWIDTH, Length in samples = T * FS */
-#define TRANSMITTER_LFM_LENGTH ((TRANSMITTER_COMPRESSION_RATIO * TRANSMITTER_FS_HZ) / TRANSMITTER_LFM_BANDWIDTH_HZ)
 
 #ifdef SIMULATION_MODE
 #define TRANSMITTER_SIMULATION_DELAY 1000U
@@ -69,6 +63,8 @@ static void Transmitter_GenerateLfmWaveform(void)
     }
 }
 
+static Transmitter_PulseType current_pulse_type = TRANSMITTER_PULSE_SINGLE;
+
 void Transmitter_Init(void)
 {
     Transmitter_GenerateSingleWaveform();
@@ -82,6 +78,7 @@ void Transmitter_Init(void)
 
 void Transmitter_SetPulseType(Transmitter_PulseType pulse_type)
 {
+    current_pulse_type = pulse_type;
     const uint16_t *src = NULL;
     uint32_t active_length = 0U;
 
@@ -125,5 +122,25 @@ void Transmitter_SetPulseType(Transmitter_PulseType pulse_type)
             transmitter_samples[n] = TRANSMITTER_BIAS;
         }
 #endif
+    }
+}
+
+uint32_t Transmitter_GetActiveWaveform(const uint16_t **waveform)
+{
+    if (current_pulse_type == TRANSMITTER_PULSE_LFM)
+    {
+        if (waveform != NULL)
+        {
+            *waveform = transmitter_lfm_waveform;
+        }
+        return TRANSMITTER_LFM_LENGTH;
+    }
+    else
+    {
+        if (waveform != NULL)
+        {
+            *waveform = transmitter_single_waveform;
+        }
+        return TRANSMITTER_SINGLE_LENGTH;
     }
 }
