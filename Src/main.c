@@ -11,6 +11,7 @@ int main(void)
 {
     HAL_Init();
     SystemClock_Config();
+    HAL_ICACHE_Enable();
     ComMgr_Init();
     
     // Initialize applications

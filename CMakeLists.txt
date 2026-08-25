@@ -64,6 +64,7 @@ set(SOURCES
     Src/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_pwr_ex.c
     Src/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_flash.c
     Src/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_flash_ex.c
+    Src/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_icache.c
     Src/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_exti.c
 
     # TinyUSB sources
