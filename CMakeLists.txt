@@ -49,6 +49,9 @@ set(SOURCES
     Src/Services/ADCService.c
     Src/Services/DACService.c
 
+    # Drivers
+    Src/Drivers/UARTDriver.c
+
     # ST HAL Driver sources needed for USB and minimal GPIO/RCC
     Src/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal.c
     Src/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_cortex.c
@@ -81,6 +84,7 @@ set(INC_DIRS
     Inc
     Src/Apps
     Src/Services
+    Src/Drivers
     Src/Drivers/CMSIS/Include
     Src/Drivers/CMSIS/Device/ST/STM32H5xx/Include
     Src/Drivers/STM32H5xx_HAL_Driver/Inc

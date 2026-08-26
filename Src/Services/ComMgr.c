@@ -1,4 +1,5 @@
 #include "ComMgr.h"
+#include "UARTDriver.h"
 #include "tusb.h"
 #include "ADCService.h"
 #include "DACService.h"
@@ -32,7 +33,7 @@ static uint32_t ComMgr_TxFree(void)
 }
 
 // ====================================================================
-// Cấu hình Low-Level USB cho STM32H5
+// Cấu hình Low-Level USB và UART cho STM32H5
 // ====================================================================
 
 void ComMgr_Init(void)
@@ -70,6 +71,9 @@ void ComMgr_Init(void)
 
     // 7. Khởi tạo TinyUSB stack
     tusb_init();
+
+    // 8. Khởi tạo UARTDriver với tốc độ baud rate định nghĩa trong ComMgr.h
+    UARTDriver_Init(COMMGR_UART_BAUDRATE);
 }
 
 void ComMgr_Process(void)
@@ -196,6 +200,16 @@ void ComMgr_SendData(void const *data, uint32_t length)
         tx_queue[tx_queue_head] = buffer[index];
         tx_queue_head = (tx_queue_head + 1U) % COMMGR_TX_QUEUE_SIZE;
     }
+}
+
+void ComMgr_SendUartData(void const *data, uint32_t length)
+{
+    UARTDriver_SendData(data, length);
+}
+
+void ComMgr_SendUartString(const char *str)
+{
+    UARTDriver_SendString(str);
 }
 
 // Hàm xử lý ngắt USB
