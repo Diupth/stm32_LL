@@ -14,7 +14,7 @@ int main(void)
     SystemClock_Config();
     HAL_ICACHE_Enable();
 
-    // Khởi tạo ComMgr (đã bao gồm USB và UART với baudrate COMMGR_UART_BAUDRATE = 6 Mbps)
+    // Khởi tạo ComMgr (Sử dụng UART4 DMA 6 Mbps)
     ComMgr_Init();
     
     // Initialize applications
@@ -22,25 +22,15 @@ int main(void)
     Receiver_Init();
     SyncSignalApp_Init(); // Initialize timer last to start conversions
 
-    uint32_t last_uart_tick = HAL_GetTick();
-    const char *msg = "hello world\r\n";
-
     while (1)
     {
-        // 1. Gửi bản tin qua UART sau mỗi 1s bằng ComMgr (RingBuffer DMA 100% Non-blocking)
-        if (HAL_GetTick() - last_uart_tick >= 1000)
-        {
-            last_uart_tick = HAL_GetTick();
-            ComMgr_SendUartString(msg);
-        }
-
-        // 2. Process USB tasks (cdc flush, tud task)
+        // 1. Process communication tasks
         ComMgr_Process();
 
-        // 3. Receive a physical frame and forward it over USB
+        // 2. Receive a physical frame and forward it over UART
         Receiver_Process();
 
-        // 4. Send periodic synchronization telemetry
+        // 3. Send periodic synchronization telemetry
         SyncSignalApp_Process();
     }
 }

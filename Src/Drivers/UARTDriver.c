@@ -29,14 +29,20 @@ void UARTDriver_Init(uint32_t baudrate)
     __HAL_RCC_UART4_CLK_ENABLE();
     (void)RCC->APB1LENR; // Đọc lại để đảm bảo clock đã tích cực
 
-    // 2. Cấu hình chân PB8 (UART4_RX) và PB9 (UART4_TX) bằng HAL_GPIO_Init
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
-    GPIO_InitStruct.Pin = GPIO_PIN_8 | GPIO_PIN_9;
-    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-    GPIO_InitStruct.Pull = GPIO_PULLUP;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-    GPIO_InitStruct.Alternate = GPIO_AF8_UART4;
-    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+    // 2. Cấu hình chân PB8 (RX) và PB9 (TX) sang Alternate Function AF8 (UART4) - Register level
+    GPIOB->MODER &= ~((3U << (8 * 2)) | (3U << (9 * 2)));
+    GPIOB->MODER |= ((2U << (8 * 2)) | (2U << (9 * 2)));
+
+    // OSPEEDR: Very High Speed (11)
+    GPIOB->OSPEEDR |= ((3U << (8 * 2)) | (3U << (9 * 2)));
+
+    // PUPDR: Pull-up (01)
+    GPIOB->PUPDR &= ~((3U << (8 * 2)) | (3U << (9 * 2)));
+    GPIOB->PUPDR |= ((1U << (8 * 2)) | (1U << (9 * 2)));
+
+    // AFR: AF8 (0x8) cho PB8 và PB9 trong AFR[1] (AFRH)
+    GPIOB->AFR[1] &= ~((0xFU << ((8 - 8) * 4)) | (0xFU << ((9 - 8) * 4)));
+    GPIOB->AFR[1] |= ((8U << ((8 - 8) * 4)) | (8U << ((9 - 8) * 4)));
 
     // 3. Cấu hình GPDMA1 Channel 3 cho UART4 TX
     // Channel 3 có độ ưu tiên thấp nhất (PRIO = 0: Low priority) để không cản trở ADC/DAC.
@@ -84,13 +90,24 @@ void UARTDriver_Init(uint32_t baudrate)
     // Bật chế độ DMA Transmitter trong CR3 (DMAT)
     UART4->CR3 |= USART_CR3_DMAT;
 
-    // Kích hoạt Bộ phát (TE), Bộ nhận (RE) và Bật UART (UE)
-    UART4->CR1 = USART_CR1_TE | USART_CR1_RE | USART_CR1_UE;
+    // Kích hoạt Bộ phát (TE), Bộ nhận (RE), Ngắt nhận byte (RXNEIE) và Bật UART (UE)
+    UART4->CR1 = USART_CR1_TE | USART_CR1_RE | USART_CR1_RXNEIE_RXFNEIE | USART_CR1_UE;
+
+    // Cấu hình ngắt UART4 trong NVIC (độ ưu tiên thấp 12 để không chặn ADC/DAC)
+    HAL_NVIC_SetPriority(UART4_IRQn, 12, 0);
+    HAL_NVIC_EnableIRQ(UART4_IRQn);
 
     uart_head = 0U;
     uart_tail = 0U;
     uart_dma_len = 0U;
     uart_dma_busy = false;
+}
+
+static UARTDriver_RxCallback uart_rx_cb = NULL;
+
+void UARTDriver_SetRxCallback(UARTDriver_RxCallback cb)
+{
+    uart_rx_cb = cb;
 }
 
 uint32_t UARTDriver_GetTxFree(void)
@@ -127,11 +144,12 @@ static void UARTDriver_StartDmaTransfer_Locked(void)
     uart_dma_busy = true;
 
     // Cấu hình thanh ghi DMA Channel 3
-    GPDMA1_Channel3->CCR &= ~DMA_CCR_EN;
-    GPDMA1_Channel3->CFCR = DMA_CFCR_TCF | DMA_CFCR_HTF | DMA_CFCR_DTEF | DMA_CFCR_USEF;
+    GPDMA1_Channel3->CCR = 0U;
+    GPDMA1_Channel3->CFCR = DMA_CFCR_TCF | DMA_CFCR_HTF | DMA_CFCR_DTEF | DMA_CFCR_USEF | DMA_CFCR_ULEF | DMA_CFCR_TOF;
     GPDMA1_Channel3->CSAR = (uint32_t)&uart_ring_buf[uart_tail];
-    GPDMA1_Channel3->CBR1 = len;
-    GPDMA1_Channel3->CCR |= DMA_CCR_EN;
+    GPDMA1_Channel3->CDAR = (uint32_t)&(UART4->TDR);
+    GPDMA1_Channel3->CBR1 = (len & DMA_CBR1_BNDT);
+    GPDMA1_Channel3->CCR = DMA_CCR_TCIE | DMA_CCR_USEIE | DMA_CCR_DTEIE | DMA_CCR_EN;
 }
 
 void UARTDriver_SendData(const void *data, uint32_t length)
@@ -140,28 +158,32 @@ void UARTDriver_SendData(const void *data, uint32_t length)
 
     const uint8_t *src = (const uint8_t *)data;
 
-    // Kiểm tra dung lượng trống (không block CPU, chỉ lấy số lượng có thể nhận)
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+
+    // Kiểm tra dung lượng trống
     uint32_t free_space = UARTDriver_GetTxFree();
     if (length > free_space)
     {
         length = free_space;
     }
-    if (length == 0U) return;
 
-    // Đẩy dữ liệu vào Ring Buffer
-    for (uint32_t i = 0U; i < length; i++)
+    if (length > 0U)
     {
-        uart_ring_buf[uart_head] = src[i];
-        uart_head = (uart_head + 1U) % UART_RING_BUFFER_SIZE;
+        // Đẩy dữ liệu vào Ring Buffer
+        for (uint32_t i = 0U; i < length; i++)
+        {
+            uart_ring_buf[uart_head] = src[i];
+            uart_head = (uart_head + 1U) % UART_RING_BUFFER_SIZE;
+        }
+
+        // Kích hoạt DMA nếu đang rảnh
+        if (!uart_dma_busy)
+        {
+            UARTDriver_StartDmaTransfer_Locked();
+        }
     }
 
-    // Kích hoạt DMA nếu đang rảnh
-    uint32_t primask = __get_PRIMASK();
-    __disable_irq();
-    if (!uart_dma_busy)
-    {
-        UARTDriver_StartDmaTransfer_Locked();
-    }
     if (!primask)
     {
         __enable_irq();
@@ -203,5 +225,27 @@ void GPDMA1_Channel3_IRQHandler(void)
     {
         GPDMA1_Channel3->CFCR |= (DMA_CFCR_DTEF | DMA_CFCR_ULEF | DMA_CFCR_USEF);
         uart_dma_busy = false;
+    }
+}
+
+// Ngắt UART4 khi nhận dữ liệu (RXNE) hoặc lỗi đường truyền
+void UART4_IRQHandler(void)
+{
+    uint32_t isr = UART4->ISR;
+
+    // Đọc byte nhận được
+    if (isr & USART_ISR_RXNE_RXFNE)
+    {
+        uint8_t byte = (uint8_t)(UART4->RDR);
+        if (uart_rx_cb != NULL)
+        {
+            uart_rx_cb(byte);
+        }
+    }
+
+    // Xóa cờ lỗi nếu có (Overrun, Framing, Noise)
+    if (isr & (USART_ISR_ORE | USART_ISR_NE | USART_ISR_FE | USART_ISR_PE))
+    {
+        UART4->ICR = USART_ICR_ORECF | USART_ICR_NECF | USART_ICR_FECF | USART_ICR_PECF;
     }
 }

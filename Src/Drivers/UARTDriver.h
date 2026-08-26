@@ -6,11 +6,19 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+typedef void (*UARTDriver_RxCallback)(uint8_t byte);
+
 /**
  * @brief Khởi tạo UART4 và GPDMA1 Channel 3 với RingBuffer TX (PB9: TX, PB8: RX)
  * @param baudrate Tốc độ baud (vd: 6000000)
  */
 void UARTDriver_Init(uint32_t baudrate);
+
+/**
+ * @brief Đăng ký callback nhận dữ liệu RX từ UART
+ * @param cb Con trỏ hàm callback
+ */
+void UARTDriver_SetRxCallback(UARTDriver_RxCallback cb);
 
 /**
  * @brief Kiểm tra số byte còn trống trong RingBuffer TX của UART

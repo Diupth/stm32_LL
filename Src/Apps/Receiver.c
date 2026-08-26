@@ -183,13 +183,41 @@ void Receiver_MatchedFilter(const int16_t *input, int16_t *output)
 static void Receiver_SendFrame(int16_t *const raw_buffers[2], int16_t *const filtered_buffers[2])
 {
     uint32_t rx_select = ComMgr_GetRxSelect();
+    ComMgr_StreamMode mode = ComMgr_GetStreamMode();
+    const int16_t *send_buf = NULL;
+    static int16_t calc_buf[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
+
     if (rx_select == 1U || rx_select == 2U)
     {
-        ComMgr_StreamMode mode = ComMgr_GetStreamMode();
-        const int16_t *send_buf = (mode == COMMGR_STREAM_COMPRESSED)
-                                      ? filtered_buffers[rx_select - 1U]
-                                      : raw_buffers[rx_select - 1U];
+        send_buf = (mode == COMMGR_STREAM_COMPRESSED)
+                       ? filtered_buffers[rx_select - 1U]
+                       : raw_buffers[rx_select - 1U];
+    }
+    else if (rx_select == 0U)
+    {
+        // Rx Sum = (Rx1 + Rx2) / 2
+        const int16_t *b1 = (mode == COMMGR_STREAM_COMPRESSED) ? filtered_buffers[0] : raw_buffers[0];
+        const int16_t *b2 = (mode == COMMGR_STREAM_COMPRESSED) ? filtered_buffers[1] : raw_buffers[1];
+        for (uint32_t i = 0U; i < ADC_FRAME_SAMPLE_COUNT; i++)
+        {
+            calc_buf[i] = (int16_t)(((int32_t)b1[i] + (int32_t)b2[i]) / 2);
+        }
+        send_buf = calc_buf;
+    }
+    else if (rx_select == 3U)
+    {
+        // Rx Diff = (Rx1 - Rx2) / 2 + ADC_BIAS
+        const int16_t *b1 = (mode == COMMGR_STREAM_COMPRESSED) ? filtered_buffers[0] : raw_buffers[0];
+        const int16_t *b2 = (mode == COMMGR_STREAM_COMPRESSED) ? filtered_buffers[1] : raw_buffers[1];
+        for (uint32_t i = 0U; i < ADC_FRAME_SAMPLE_COUNT; i++)
+        {
+            calc_buf[i] = (int16_t)(((int32_t)b1[i] - (int32_t)b2[i]) / 2 + ADC_BIAS);
+        }
+        send_buf = calc_buf;
+    }
 
+    if (send_buf != NULL)
+    {
         receiver_frame[3] = (uint8_t)('0' + rx_select);
         memcpy(&receiver_frame[RECEIVER_FRAME_HEADER_SIZE], send_buf, RECEIVER_FRAME_PAYLOAD_SIZE);
         ComMgr_SendData(receiver_frame, sizeof(receiver_frame));
