@@ -42,6 +42,7 @@ set(SOURCES
     Src/Apps/SyncSignalApp.c
 
     # Services
+    Src/Services/CrashHandler.c
     Src/Services/ComMgr.c
     Src/Services/SystemClock.c
     Src/Services/SyncSignal.c

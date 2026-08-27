@@ -1,4 +1,5 @@
 #include "stm32h5xx.h"
+#include "CrashHandler.h"
 #include "ComMgr.h"
 #include "SystemClock.h"
 #include "Receiver.h"
@@ -13,6 +14,7 @@ int main(void)
     HAL_Init();
     SystemClock_Config();
     HAL_ICACHE_Enable();
+    CrashHandler_Init();
 
     // Khởi tạo ComMgr (Sử dụng UART4 DMA 6 Mbps)
     ComMgr_Init();
