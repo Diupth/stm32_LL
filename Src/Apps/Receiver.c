@@ -20,13 +20,25 @@
 static uint8_t receiver_frame[RECEIVER_FRAME_SIZE] __attribute__((aligned(4)));
 static int16_t adc1_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
 static int16_t adc2_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
+static int16_t bpf1_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
+static int16_t bpf2_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
 static int16_t filtered1_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
 static int16_t filtered2_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
+
+#define BPF_NUM_STAGES 2U
+static const float bpf_coeffs[BPF_NUM_STAGES * 5U] = {
+    /* Stage 1: b0, b1, b2, -a1, -a2 */
+    0.01440144f, -0.02880288f, 0.01440144f, -1.47902943f, -0.80560112f,
+    /* Stage 2: b0, b1, b2, -a1, -a2 */
+    1.00000000f,  2.00000000f,  1.00000000f, -1.69438393f, -0.85724673f
+};
+static float bpf_state[2][BPF_NUM_STAGES * 4U];
 
 #ifdef SHOW_TIMING_LOG
 static uint32_t dsp_log_sequence = 0U;
 static uint32_t last_dsp_log_tick = 0U;
 static uint32_t read_cycles = 0U;
+static uint32_t bpf_cycles = 0U;
 static uint32_t mfilt_cycles = 0U;
 static uint32_t send_cycles = 0U;
 static uint32_t total_cycles = 0U;
@@ -34,7 +46,6 @@ static uint32_t total_cycles = 0U;
 static void Receiver_SendTimingLog(void)
 {
     uint8_t dsp_frame[40] = {'D', 'S', 'P', '1'};
-    uint32_t bpf_us = 0U;
     uint32_t demod_us = 0U;
     uint32_t accum_us = 0U;
     uint32_t detect_us = 0U;
@@ -43,7 +54,7 @@ static void Receiver_SendTimingLog(void)
         dsp_log_sequence++,
         DWTService_CyclesToUs(total_cycles),
         DWTService_CyclesToUs(read_cycles),
-        bpf_us,
+        DWTService_CyclesToUs(bpf_cycles),
         demod_us,
         DWTService_CyclesToUs(mfilt_cycles),
         DWTService_CyclesToUs(send_cycles),
@@ -74,6 +85,8 @@ void Receiver_Init(void)
     ADCService_Init(1U);
     ADCService_Init(2U);
 
+    memset(bpf_state, 0, sizeof(bpf_state));
+
     FFT_InitCMSIS();
 
     receiver_frame[0] = 'F';
@@ -82,6 +95,70 @@ void Receiver_Init(void)
     receiver_frame[3] = '1';
     receiver_frame[4] = (uint8_t)(ADC_FRAME_SAMPLE_COUNT & 0xFFU);
     receiver_frame[5] = (uint8_t)((ADC_FRAME_SAMPLE_COUNT >> 8U) & 0xFFU);
+}
+
+/**
+ * @brief Bộ lọc thông dải số (Bandpass Filter) IIR Butterworth bậc 4 (38 - 42 kHz @ Fs = 96 kHz)
+ * @details 
+ *  - Cấu trúc: 2 tầng Biquad nối tầng (Cascaded Direct Form I SOS - Second Order Sections).
+ *  - Dải thông: 38.0 kHz đến 42.0 kHz tại tần số lấy mẫu Fs = 96.0 kHz.
+ *  - Phương trình sai phân cho mỗi tầng:
+ *      y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] + (-a1)*y[n-1] + (-a2)*y[n-2]
+ *  - Tự động nhận diện buffer input (kênh 1 hoặc kênh 2) để lưu trạng thái trễ riêng biệt giữa các frame.
+ * 
+ * @param input Con trỏ mảng mẫu thô đầu vào từ ADC (2048 mẫu, 12-bit)
+ * @param output Con trỏ mảng mẫu kết quả sau lọc (2048 mẫu, 12-bit)
+ */
+void Receiver_BPF(const int16_t *input, int16_t *output)
+{
+    if (input == NULL || output == NULL)
+    {
+        return;
+    }
+
+    /* Xác định kênh dựa trên địa chỉ buffer đầu vào để lưu state trễ riêng */
+    uint32_t idx = (input == adc2_frame_buffer) ? 1U : 0U;
+    float *st = bpf_state[idx];
+
+    /* Tải trạng thái trễ của tầng 1 và tầng 2 vào thanh ghi để tối ưu tốc độ */
+    float s1_x1 = st[0], s1_x2 = st[1], s1_y1 = st[2], s1_y2 = st[3];
+    float s2_x1 = st[4], s2_x2 = st[5], s2_y1 = st[6], s2_y2 = st[7];
+
+    /* Hệ số SOS Biquad tầng 1 */
+    const float b0_1 = bpf_coeffs[0], b1_1 = bpf_coeffs[1], b2_1 = bpf_coeffs[2];
+    const float a1_1 = bpf_coeffs[3], a2_1 = bpf_coeffs[4];
+
+    /* Hệ số SOS Biquad tầng 2 */
+    const float b0_2 = bpf_coeffs[5], b1_2 = bpf_coeffs[6], b2_2 = bpf_coeffs[7];
+    const float a1_2 = bpf_coeffs[8], a2_2 = bpf_coeffs[9];
+
+    for (uint32_t n = 0U; n < ADC_FRAME_SAMPLE_COUNT; n++)
+    {
+        /* 1. Trừ mức phân cực một chiều ADC_BIAS (2048) để chuyển về tín hiệu xoay chiều quanh 0 */
+        float x0 = (float)((int32_t)input[n] - ADC_BIAS);
+
+        /* 2. Lọc Biquad Tầng 1 */
+        float y1_val = b0_1 * x0 + b1_1 * s1_x1 + b2_1 * s1_x2 + a1_1 * s1_y1 + a2_1 * s1_y2;
+        s1_x2 = s1_x1;
+        s1_x1 = x0;
+        s1_y2 = s1_y1;
+        s1_y1 = y1_val;
+
+        /* 3. Lọc Biquad Tầng 2 (Nhận ngõ ra của Tầng 1 làm ngõ vào) */
+        float y2_val = b0_2 * y1_val + b1_2 * s2_x1 + b2_2 * s2_x2 + a1_2 * s2_y1 + a2_2 * s2_y2;
+        s2_x2 = s2_x1;
+        s2_x1 = y1_val;
+        s2_y2 = s2_y1;
+        s2_y1 = y2_val;
+
+        /* 4. Khôi phục lại mức phân cực ADC_BIAS và bão hòa an toàn trong dải 12-bit [0, 4095] */
+        int32_t result = (int32_t)y2_val + ADC_BIAS;
+        output[n] = (int16_t)__USAT(result, 12U);
+    }
+
+    /* Lưu lại trạng thái trễ để lọc tiếp tục liền mạch cho frame kế tiếp */
+    st[0] = s1_x1; st[1] = s1_x2; st[2] = s1_y1; st[3] = s1_y2;
+    st[4] = s2_x1; st[5] = s2_x2; st[6] = s2_y1; st[7] = s2_y2;
 }
 
 static int16_t h_coeffs[TRANSMITTER_LFM_LENGTH] __attribute__((aligned(4)));
@@ -282,24 +359,35 @@ void Receiver_MatchedFilterFFT(const int16_t *input, int16_t *output)
     }
 }
 
-static void Receiver_SendFrame(int16_t *const raw_buffers[2], int16_t *const filtered_buffers[2])
+static void Receiver_SendFrame(int16_t *const raw_buffers[2],
+                               int16_t *const bpf_buffers[2],
+                               int16_t *const filtered_buffers[2])
 {
     uint32_t rx_select = ComMgr_GetRxSelect();
     ComMgr_StreamMode mode = ComMgr_GetStreamMode();
+    int16_t *const *active_buffers = raw_buffers;
+
+    if (mode == COMMGR_STREAM_BPF)
+    {
+        active_buffers = bpf_buffers;
+    }
+    else if (mode == COMMGR_STREAM_COMPRESSED)
+    {
+        active_buffers = filtered_buffers;
+    }
+
     const int16_t *send_buf = NULL;
     static int16_t calc_buf[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
 
     if (rx_select == 1U || rx_select == 2U)
     {
-        send_buf = (mode == COMMGR_STREAM_COMPRESSED)
-                       ? filtered_buffers[rx_select - 1U]
-                       : raw_buffers[rx_select - 1U];
+        send_buf = active_buffers[rx_select - 1U];
     }
     else if (rx_select == 0U)
     {
         // Rx Sum = (Rx1 + Rx2) / 2
-        const int16_t *b1 = (mode == COMMGR_STREAM_COMPRESSED) ? filtered_buffers[0] : raw_buffers[0];
-        const int16_t *b2 = (mode == COMMGR_STREAM_COMPRESSED) ? filtered_buffers[1] : raw_buffers[1];
+        const int16_t *b1 = active_buffers[0];
+        const int16_t *b2 = active_buffers[1];
         for (uint32_t i = 0U; i < ADC_FRAME_SAMPLE_COUNT; i++)
         {
             calc_buf[i] = (int16_t)(((int32_t)b1[i] + (int32_t)b2[i]) / 2);
@@ -309,8 +397,8 @@ static void Receiver_SendFrame(int16_t *const raw_buffers[2], int16_t *const fil
     else if (rx_select == 3U)
     {
         // Rx Diff = (Rx1 - Rx2) / 2 + ADC_BIAS
-        const int16_t *b1 = (mode == COMMGR_STREAM_COMPRESSED) ? filtered_buffers[0] : raw_buffers[0];
-        const int16_t *b2 = (mode == COMMGR_STREAM_COMPRESSED) ? filtered_buffers[1] : raw_buffers[1];
+        const int16_t *b1 = active_buffers[0];
+        const int16_t *b2 = active_buffers[1];
         for (uint32_t i = 0U; i < ADC_FRAME_SAMPLE_COUNT; i++)
         {
             calc_buf[i] = (int16_t)(((int32_t)b1[i] - (int32_t)b2[i]) / 2 + ADC_BIAS);
@@ -336,34 +424,44 @@ void Receiver_Process(void)
     }
 
     int16_t *adc_buffers[2] = {adc1_frame_buffer, adc2_frame_buffer};
+    int16_t *bpf_buffers[2] = {bpf1_frame_buffer, bpf2_frame_buffer};
     int16_t *filtered_buffers[2] = {filtered1_frame_buffer, filtered2_frame_buffer};
 
 #ifdef SHOW_TIMING_LOG
     uint32_t t_start = DWTService_GetCycles();
     read_cycles = 0U;
+    bpf_cycles = 0U;
     mfilt_cycles = 0U;
     send_cycles = 0U;
 #endif
 
-    /* 1. Thu thập dữ liệu ADC và xử lý Matched Filter song song cho cả 2 kênh */
+    /* 1. Thu thập dữ liệu ADC, lọc BPF và xử lý Matched Filter song song cho cả 2 kênh */
     for (uint32_t chan = 1U; chan <= 2U; chan++)
     {
 #ifdef SHOW_TIMING_LOG
         uint32_t t_read_start = DWTService_GetCycles();
-#endif
         ADCService_ReadFrame(chan, adc_buffers[chan - 1U]);
-#ifdef SHOW_TIMING_LOG
         read_cycles += (DWTService_GetCycles() - t_read_start);
+
+        uint32_t t_bpf_start = DWTService_GetCycles();
+        Receiver_BPF(adc_buffers[chan - 1U], bpf_buffers[chan - 1U]);
+        bpf_cycles += (DWTService_GetCycles() - t_bpf_start);
+
         uint32_t t_mfilt_start = DWTService_GetCycles();
-#endif
-        /* Bạn có thể chọn Receiver_MatchedFilter (Direct SIMD) hoặc Receiver_MatchedFilterFFT (Frequency domain) */
 #if defined(USE_FFT_MATCHED_FILTER)
-        Receiver_MatchedFilterFFT(adc_buffers[chan - 1U], filtered_buffers[chan - 1U]);
+        Receiver_MatchedFilterFFT(bpf_buffers[chan - 1U], filtered_buffers[chan - 1U]);
 #else
-        Receiver_MatchedFilter(adc_buffers[chan - 1U], filtered_buffers[chan - 1U]);
+        Receiver_MatchedFilter(bpf_buffers[chan - 1U], filtered_buffers[chan - 1U]);
 #endif
-#ifdef SHOW_TIMING_LOG
         mfilt_cycles += (DWTService_GetCycles() - t_mfilt_start);
+#else
+        ADCService_ReadFrame(chan, adc_buffers[chan - 1U]);
+        Receiver_BPF(adc_buffers[chan - 1U], bpf_buffers[chan - 1U]);
+#if defined(USE_FFT_MATCHED_FILTER)
+        Receiver_MatchedFilterFFT(bpf_buffers[chan - 1U], filtered_buffers[chan - 1U]);
+#else
+        Receiver_MatchedFilter(bpf_buffers[chan - 1U], filtered_buffers[chan - 1U]);
+#endif
 #endif
     }
 
@@ -371,7 +469,7 @@ void Receiver_Process(void)
 #ifdef SHOW_TIMING_LOG
     uint32_t t_send_start = DWTService_GetCycles();
 #endif
-    Receiver_SendFrame(adc_buffers, filtered_buffers);
+    Receiver_SendFrame(adc_buffers, bpf_buffers, filtered_buffers);
 #ifdef SHOW_TIMING_LOG
     send_cycles = DWTService_GetCycles() - t_send_start;
     total_cycles = DWTService_GetCycles() - t_start;

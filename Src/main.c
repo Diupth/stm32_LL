@@ -32,7 +32,7 @@ int main(void)
         // 2. Receive a physical frame and forward it over UART
         Receiver_Process();
 
-        // 3. Send periodic synchronization telemetry
+        // 3. Send periodic synchronization telemetry and heartbeat log (1s)
         SyncSignalApp_Process();
     }
 }
