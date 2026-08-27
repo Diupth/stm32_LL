@@ -20,7 +20,6 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 add_compile_definitions(
     STM32H562xx
     USE_HAL_DRIVER
-    CFG_TUSB_MCU=OPT_MCU_STM32H5
 )
 
 add_definitions(
@@ -66,6 +65,18 @@ set(SOURCES
     Src/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_flash_ex.c
     Src/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_icache.c
     Src/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_exti.c
+
+    # CMSIS DSP sources
+    Src/Drivers/CMSIS/DSP/Source/TransformFunctions/arm_rfft_fast_f32.c
+    Src/Drivers/CMSIS/DSP/Source/TransformFunctions/arm_rfft_fast_init_f32.c
+    Src/Drivers/CMSIS/DSP/Source/TransformFunctions/arm_cfft_f32.c
+    Src/Drivers/CMSIS/DSP/Source/TransformFunctions/arm_cfft_init_f32.c
+    Src/Drivers/CMSIS/DSP/Source/TransformFunctions/arm_cfft_radix8_f32.c
+    Src/Drivers/CMSIS/DSP/Source/TransformFunctions/arm_bitreversal2.c
+    Src/Drivers/CMSIS/DSP/Source/CommonTables/arm_common_tables.c
+    Src/Drivers/CMSIS/DSP/Source/CommonTables/arm_const_structs.c
+    Src/Drivers/CMSIS/DSP/Source/ComplexMathFunctions/arm_cmplx_mult_cmplx_f32.c
+    Src/Drivers/CMSIS/DSP/Source/ComplexMathFunctions/arm_cmplx_mag_f32.c
 )
 
 # Include directories
@@ -75,10 +86,11 @@ set(INC_DIRS
     Src/Services
     Src/Drivers
     Src/Drivers/CMSIS/Include
+    Src/Drivers/CMSIS/DSP/Include
+    Src/Drivers/CMSIS/DSP/PrivateInclude
     Src/Drivers/CMSIS/Device/ST/STM32H5xx/Include
     Src/Drivers/STM32H5xx_HAL_Driver/Inc
     Src/Drivers/STM32H5xx_HAL_Driver/Inc/Legacy
-    Src/Drivers/tinyusb/src
 )
 
 # Target executable

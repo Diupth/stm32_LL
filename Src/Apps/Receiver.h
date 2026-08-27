@@ -7,5 +7,6 @@
 void Receiver_Init(void);
 void Receiver_Process(void);
 void Receiver_MatchedFilter(const int16_t *input, int16_t *output);
+void Receiver_MatchedFilterFFT(const int16_t *input, int16_t *output);
 
 #endif /* RECEIVER_H */

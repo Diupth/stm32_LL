@@ -15,6 +15,7 @@
 #define RECEIVER_FRAME_SIZE (RECEIVER_FRAME_HEADER_SIZE + RECEIVER_FRAME_PAYLOAD_SIZE)
 
 #define ADC_BIAS 2048
+#define USE_FFT_MATCHED_FILTER 1
 
 static uint8_t receiver_frame[RECEIVER_FRAME_SIZE] __attribute__((aligned(4)));
 static int16_t adc1_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
@@ -62,6 +63,8 @@ static void Receiver_SendTimingLog(void)
 }
 #endif
 
+static void FFT_InitCMSIS(void);
+
 void Receiver_Init(void)
 {
 #ifdef SHOW_TIMING_LOG
@@ -70,6 +73,8 @@ void Receiver_Init(void)
 #endif
     ADCService_Init(1U);
     ADCService_Init(2U);
+
+    FFT_InitCMSIS();
 
     receiver_frame[0] = 'F';
     receiver_frame[1] = 'R';
@@ -180,6 +185,103 @@ void Receiver_MatchedFilter(const int16_t *input, int16_t *output)
     }
 }
 
+/* ========================================================================= */
+/*                   FREQUENCY DOMAIN MATCHED FILTER (CMSIS-DSP)            */
+/* ========================================================================= */
+#include "arm_math.h"
+#include "arm_const_structs.h"
+
+#define FFT_SIZE 4096U
+
+static arm_rfft_fast_instance_f32 rfft_instance;
+static bool rfft_initialized = false;
+
+static float fft_in[FFT_SIZE] __attribute__((aligned(4)));
+static float fft_out[FFT_SIZE] __attribute__((aligned(4)));
+static float fft_h_buf[FFT_SIZE] __attribute__((aligned(4)));
+static float fft_x_buf[FFT_SIZE] __attribute__((aligned(4)));
+static float fft_prod[FFT_SIZE] __attribute__((aligned(4)));
+
+static uint32_t last_fft_ref_len = 0U;
+static const uint16_t *last_fft_waveform_ptr = NULL;
+
+static void FFT_InitCMSIS(void)
+{
+    if (!rfft_initialized)
+    {
+        arm_rfft_fast_init_f32(&rfft_instance, FFT_SIZE);
+        rfft_initialized = true;
+    }
+}
+
+void Receiver_MatchedFilterFFT(const int16_t *input, int16_t *output)
+{
+    const uint16_t *ref_waveform = NULL;
+    uint32_t ref_len = Transmitter_GetActiveWaveform(&ref_waveform);
+
+    if (input == NULL || output == NULL || ref_waveform == NULL || ref_len == 0U)
+    {
+        return;
+    }
+
+    if (!rfft_initialized)
+    {
+        FFT_InitCMSIS();
+    }
+
+    /* 1. Tiền tính toán phổ liên hợp H*(f) của tín hiệu mẫu khi mẫu thay đổi */
+    if (ref_len != last_fft_ref_len || ref_waveform != last_fft_waveform_ptr)
+    {
+        memset(fft_in, 0, sizeof(fft_in));
+        for (uint32_t i = 0U; i < ref_len; i++)
+        {
+            fft_in[i] = (float)((int32_t)ref_waveform[i] - ADC_BIAS);
+        }
+
+        /* Forward RFFT của mẫu phát */
+        arm_rfft_fast_f32(&rfft_instance, fft_in, fft_h_buf, 0);
+
+        /* Lấy liên hợp phức: H*(f) = Re(H) - j * Im(H) */
+        for (uint32_t i = 3U; i < FFT_SIZE; i += 2U)
+        {
+            fft_h_buf[i] = -fft_h_buf[i];
+        }
+
+        last_fft_ref_len = ref_len;
+        last_fft_waveform_ptr = ref_waveform;
+    }
+
+    /* 2. Nạp tín hiệu vào, trừ bias ADC và zero-pad */
+    for (uint32_t i = 0U; i < ADC_FRAME_SAMPLE_COUNT; i++)
+    {
+        fft_in[i] = (float)((int32_t)input[i] - ADC_BIAS);
+    }
+    memset(&fft_in[ADC_FRAME_SAMPLE_COUNT], 0, (FFT_SIZE - ADC_FRAME_SAMPLE_COUNT) * sizeof(float));
+
+    /* 3. Forward RFFT của tín hiệu thu X(f) */
+    arm_rfft_fast_f32(&rfft_instance, fft_in, fft_x_buf, 0);
+
+    /* 4. Nhân chập miền tần số (Tương quan phức): Y(f) = X(f) * H*(f) */
+    /* Bin DC và Nyquist là số thực thuần */
+    fft_prod[0] = fft_x_buf[0] * fft_h_buf[0];
+    fft_prod[1] = fft_x_buf[1] * fft_h_buf[1];
+
+    /* Các bin phức từ index 2 đến FFT_SIZE-1 */
+    arm_cmplx_mult_cmplx_f32(&fft_x_buf[2], &fft_h_buf[2], &fft_prod[2], (FFT_SIZE - 2U) / 2U);
+
+    /* 5. Inverse RFFT: khôi phục tín hiệu miền thời gian ra buffer riêng fft_out */
+    arm_rfft_fast_f32(&rfft_instance, fft_prod, fft_out, 1);
+
+    /* 6. Chuẩn hóa scale biên độ và khôi phục bias 12-bit ADC */
+    const float scale = 1.0f / (float)(ref_len * 1024U);
+    for (uint32_t n = 0U; n < ADC_FRAME_SAMPLE_COUNT; n++)
+    {
+        float val = fft_out[n] * scale;
+        int32_t result = (int32_t)val + ADC_BIAS;
+        output[n] = (int16_t)__USAT(result, 12U);
+    }
+}
+
 static void Receiver_SendFrame(int16_t *const raw_buffers[2], int16_t *const filtered_buffers[2])
 {
     uint32_t rx_select = ComMgr_GetRxSelect();
@@ -254,7 +356,12 @@ void Receiver_Process(void)
         read_cycles += (DWTService_GetCycles() - t_read_start);
         uint32_t t_mfilt_start = DWTService_GetCycles();
 #endif
+        /* Bạn có thể chọn Receiver_MatchedFilter (Direct SIMD) hoặc Receiver_MatchedFilterFFT (Frequency domain) */
+#if defined(USE_FFT_MATCHED_FILTER)
+        Receiver_MatchedFilterFFT(adc_buffers[chan - 1U], filtered_buffers[chan - 1U]);
+#else
         Receiver_MatchedFilter(adc_buffers[chan - 1U], filtered_buffers[chan - 1U]);
+#endif
 #ifdef SHOW_TIMING_LOG
         mfilt_cycles += (DWTService_GetCycles() - t_mfilt_start);
 #endif
