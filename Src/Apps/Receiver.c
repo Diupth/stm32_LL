@@ -22,6 +22,10 @@ static int16_t adc1_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(
 static int16_t adc2_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
 static int16_t bpf1_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
 static int16_t bpf2_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
+static Complex_q31 iq1_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(8)));
+static Complex_q31 iq2_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(8)));
+static int16_t demod1_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
+static int16_t demod2_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
 static int16_t filtered1_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
 static int16_t filtered2_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
 
@@ -34,11 +38,32 @@ static const float bpf_coeffs[BPF_NUM_STAGES * 5U] = {
 };
 static float bpf_state[2][BPF_NUM_STAGES * 4U];
 
+#define LPF_NUM_STAGES 2U
+#define LPF_NUM_CHANNELS 4U  /* 0: Ch1_I, 1: Ch1_Q, 2: Ch2_I, 3: Ch2_Q */
+
+/* Hệ số LPF Butterworth bậc 4, Fc = 2.0 kHz @ Fs = 96 kHz dạng float */
+static const float lpf_coeffs_float[LPF_NUM_STAGES * 5U] = {
+    /* Stage 1: b0, b1, b2, -a1, -a2 */
+    0.00381725f, 0.00763449f, 0.00381725f,  1.76950435f, -0.78477333f,
+    /* Stage 2: b0, b1, b2, -a1, -a2 */
+    0.00407407f, 0.00814814f, 0.00407407f,  1.88855595f, -0.90485223f
+};
+static float lpf_state_float[LPF_NUM_CHANNELS][LPF_NUM_STAGES * 4U];
+
+/* Cosine / Sine LUT cho sóng mang fc = 40.0 kHz @ Fs = 96 kHz (chu kỳ 12 mẫu) ở định dạng Q15 (1.0 = 32767) */
+static const int16_t cos_carrier_lut_q15[12] = {
+    32767, -28377, 16384, 0, -16383, 28377, -32767, 28377, -16384, 0, 16383, -28377
+};
+static const int16_t sin_carrier_lut_q15[12] = {
+    0, 16383, -28377, 32767, -28377, 16384, 0, -16384, 28377, -32767, 28377, -16383
+};
+
 #ifdef SHOW_TIMING_LOG
 static uint32_t dsp_log_sequence = 0U;
 static uint32_t last_dsp_log_tick = 0U;
 static uint32_t read_cycles = 0U;
 static uint32_t bpf_cycles = 0U;
+static uint32_t demod_cycles = 0U;
 static uint32_t mfilt_cycles = 0U;
 static uint32_t send_cycles = 0U;
 static uint32_t total_cycles = 0U;
@@ -46,7 +71,6 @@ static uint32_t total_cycles = 0U;
 static void Receiver_SendTimingLog(void)
 {
     uint8_t dsp_frame[40] = {'D', 'S', 'P', '1'};
-    uint32_t demod_us = 0U;
     uint32_t accum_us = 0U;
     uint32_t detect_us = 0U;
 
@@ -55,7 +79,7 @@ static void Receiver_SendTimingLog(void)
         DWTService_CyclesToUs(total_cycles),
         DWTService_CyclesToUs(read_cycles),
         DWTService_CyclesToUs(bpf_cycles),
-        demod_us,
+        DWTService_CyclesToUs(demod_cycles),
         DWTService_CyclesToUs(mfilt_cycles),
         DWTService_CyclesToUs(send_cycles),
         accum_us,
@@ -86,6 +110,7 @@ void Receiver_Init(void)
     ADCService_Init(2U);
 
     memset(bpf_state, 0, sizeof(bpf_state));
+    memset(lpf_state_float, 0, sizeof(lpf_state_float));
 
     FFT_InitCMSIS();
 
@@ -159,6 +184,132 @@ void Receiver_BPF(const int16_t *input, int16_t *output)
     /* Lưu lại trạng thái trễ để lọc tiếp tục liền mạch cho frame kế tiếp */
     st[0] = s1_x1; st[1] = s1_x2; st[2] = s1_y1; st[3] = s1_y2;
     st[4] = s2_x1; st[5] = s2_x2; st[6] = s2_y1; st[7] = s2_y2;
+}
+
+/**
+ * @brief Bộ lọc thông thấp IIR Butterworth bậc 4 (Fc = 2 kHz @ Fs = 96 kHz) xử lý tín hiệu
+ * @details 
+ *  - Cấu trúc: 2 tầng Biquad nối tầng (Cascaded Direct Form I SOS), FPU Cortex-M33 phần cứng.
+ *  - Đầu vào và đầu ra giữ nguyên kiểu int32 để tương thích toàn bộ pipeline phức int32.
+ * 
+ * @param input Mảng tín hiệu đầu vào int32
+ * @param output Mảng tín hiệu đầu ra int32 sau lọc
+ * @param state_id Chỉ số kênh (0: Ch1_I, 1: Ch1_Q, 2: Ch2_I, 3: Ch2_Q)
+ */
+void Receiver_LPF(const int32_t *input, int32_t *output, uint32_t state_id)
+{
+    if (input == NULL || output == NULL || state_id >= LPF_NUM_CHANNELS)
+    {
+        return;
+    }
+
+    float *st = lpf_state_float[state_id];
+
+    float s1_x1 = st[0], s1_x2 = st[1], s1_y1 = st[2], s1_y2 = st[3];
+    float s2_x1 = st[4], s2_x2 = st[5], s2_y1 = st[6], s2_y2 = st[7];
+
+    /* Hệ số tầng 1 */
+    const float b0_1 = lpf_coeffs_float[0], b1_1 = lpf_coeffs_float[1], b2_1 = lpf_coeffs_float[2];
+    const float a1_1 = lpf_coeffs_float[3], a2_1 = lpf_coeffs_float[4];
+
+    /* Hệ số tầng 2 */
+    const float b0_2 = lpf_coeffs_float[5], b1_2 = lpf_coeffs_float[6], b2_2 = lpf_coeffs_float[7];
+    const float a1_2 = lpf_coeffs_float[8], a2_2 = lpf_coeffs_float[9];
+
+    for (uint32_t n = 0U; n < ADC_FRAME_SAMPLE_COUNT; n++)
+    {
+        float x0 = (float)input[n];
+
+        /* Tầng 1: Direct Form I SOS */
+        float y1_val = b0_1 * x0 + b1_1 * s1_x1 + b2_1 * s1_x2 + a1_1 * s1_y1 + a2_1 * s1_y2;
+        s1_x2 = s1_x1;
+        s1_x1 = x0;
+        s1_y2 = s1_y1;
+        s1_y1 = y1_val;
+
+        /* Tầng 2: Direct Form I SOS */
+        float y2_val = b0_2 * y1_val + b1_2 * s2_x1 + b2_2 * s2_x2 + a1_2 * s2_y1 + a2_2 * s2_y2;
+        s2_x2 = s2_x1;
+        s2_x1 = y1_val;
+        s2_y2 = s2_y1;
+        s2_y1 = y2_val;
+
+        output[n] = (int32_t)lrintf(y2_val);
+    }
+
+    st[0] = s1_x1; st[1] = s1_x2; st[2] = s1_y1; st[3] = s1_y2;
+    st[4] = s2_x1; st[5] = s2_x2; st[6] = s2_y1; st[7] = s2_y2;
+}
+
+/**
+ * @brief Bộ giải điều chế số I/Q (Quadrature Demodulator)
+ * @details
+ *  - Chuyển phổ tín hiệu từ [39 kHz, 41 kHz] về [-1 kHz, +1 kHz] (Baseband quanh 0 Hz).
+ *  - Tần số sóng mang cục bộ: fc = 40.0 kHz, tần số lấy mẫu Fs = 96.0 kHz.
+ *  - Toàn bộ tính toán nhân trộn sóng và lọc LPF dùng số nguyên int32 / fixed-point.
+ *  - Đầu ra phức (iq_output) lưu trữ trực tiếp (I, Q) dạng int32/Q31 để phục vụ matched filter / FFT vận tốc tiếp theo.
+ *  - Đầu ra mag_output (nếu khác NULL) tính biên độ bao và đưa về 12-bit ADC bias phục vụ hiển thị / stream.
+ *
+ * @param input Con trỏ mảng mẫu đầu vào từ BPF (2048 mẫu, 12-bit)
+ * @param iq_output Con trỏ mảng mẫu số phức int32 đầu ra (2048 phần tử Complex_q31)
+ * @param mag_output Con trỏ mảng mẫu biên độ 12-bit (có thể NULL nếu không cần hiển thị)
+ */
+static int32_t mix_i[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
+static int32_t mix_q[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
+static int32_t lpf_i[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
+static int32_t lpf_q[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
+
+void Receiver_IQDemodulator(const int16_t *input, Complex_q31 *iq_output, int16_t *mag_output)
+{
+    if (input == NULL)
+    {
+        return;
+    }
+
+    /* Xác định kênh: Kênh 1 (state 0 cho I, 1 cho Q), Kênh 2 (state 2 cho I, 3 cho Q) */
+    uint32_t chan_idx = (input == bpf2_frame_buffer) ? 1U : 0U;
+    uint32_t state_id_i = chan_idx * 2U;
+    uint32_t state_id_q = chan_idx * 2U + 1U;
+
+    /* Bước 1: Trộn tần số hạ dải (Down-mixing về Baseband) dạng int32 fixed-point */
+    for (uint32_t n = 0U; n < ADC_FRAME_SAMPLE_COUNT; n++)
+    {
+        int32_t x = (int32_t)input[n] - ADC_BIAS;
+        uint32_t lut_idx = n % 12U;
+        int32_t cos_val = (int32_t)cos_carrier_lut_q15[lut_idx];
+        int32_t sin_val = (int32_t)sin_carrier_lut_q15[lut_idx];
+
+        /* Nhân với 2 và chia cho 32768 (Q15): (x * cos_val * 2) >> 15 = (x * cos_val) >> 14 */
+        mix_i[n] = (x * cos_val) >> 14;
+        mix_q[n] = (-x * sin_val) >> 14;
+    }
+
+    /* Bước 2: Lọc thông thấp IIR số nguyên int32 cho từng nhánh I và Q */
+    Receiver_LPF(mix_i, lpf_i, state_id_i);
+    Receiver_LPF(mix_q, lpf_q, state_id_q);
+
+    /* Bước 3: Ghi nhận tín hiệu số phức int32 (Baseband I/Q) */
+    if (iq_output != NULL)
+    {
+        for (uint32_t n = 0U; n < ADC_FRAME_SAMPLE_COUNT; n++)
+        {
+            iq_output[n].real = lpf_i[n];
+            iq_output[n].imag = lpf_q[n];
+        }
+    }
+
+    /* Bước 4: Tính biên độ bao 12-bit nếu có yêu cầu xuất ra mag_output */
+    if (mag_output != NULL)
+    {
+        for (uint32_t n = 0U; n < ADC_FRAME_SAMPLE_COUNT; n++)
+        {
+            int64_t i_val = (int64_t)lpf_i[n];
+            int64_t q_val = (int64_t)lpf_q[n];
+            int32_t env = (int32_t)sqrtf((float)(i_val * i_val + q_val * q_val));
+            int32_t result = env + ADC_BIAS;
+            mag_output[n] = (int16_t)__USAT(result, 12U);
+        }
+    }
 }
 
 static int16_t h_coeffs[TRANSMITTER_LFM_LENGTH] __attribute__((aligned(4)));
@@ -361,6 +512,7 @@ void Receiver_MatchedFilterFFT(const int16_t *input, int16_t *output)
 
 static void Receiver_SendFrame(int16_t *const raw_buffers[2],
                                int16_t *const bpf_buffers[2],
+                               int16_t *const demod_buffers[2],
                                int16_t *const filtered_buffers[2])
 {
     uint32_t rx_select = ComMgr_GetRxSelect();
@@ -370,6 +522,10 @@ static void Receiver_SendFrame(int16_t *const raw_buffers[2],
     if (mode == COMMGR_STREAM_BPF)
     {
         active_buffers = bpf_buffers;
+    }
+    else if (mode == COMMGR_STREAM_DEMODULATED)
+    {
+        active_buffers = demod_buffers;
     }
     else if (mode == COMMGR_STREAM_COMPRESSED)
     {
@@ -425,17 +581,20 @@ void Receiver_Process(void)
 
     int16_t *adc_buffers[2] = {adc1_frame_buffer, adc2_frame_buffer};
     int16_t *bpf_buffers[2] = {bpf1_frame_buffer, bpf2_frame_buffer};
+    Complex_q31 *iq_buffers[2] = {iq1_frame_buffer, iq2_frame_buffer};
+    int16_t *demod_buffers[2] = {demod1_frame_buffer, demod2_frame_buffer};
     int16_t *filtered_buffers[2] = {filtered1_frame_buffer, filtered2_frame_buffer};
 
 #ifdef SHOW_TIMING_LOG
     uint32_t t_start = DWTService_GetCycles();
     read_cycles = 0U;
     bpf_cycles = 0U;
+    demod_cycles = 0U;
     mfilt_cycles = 0U;
     send_cycles = 0U;
 #endif
 
-    /* 1. Thu thập dữ liệu ADC, lọc BPF và xử lý Matched Filter song song cho cả 2 kênh */
+    /* 1. Thu thập dữ liệu ADC, lọc BPF, giải điều chế I/Q trên cả 2 kênh thu */
     for (uint32_t chan = 1U; chan <= 2U; chan++)
     {
 #ifdef SHOW_TIMING_LOG
@@ -447,6 +606,12 @@ void Receiver_Process(void)
         Receiver_BPF(adc_buffers[chan - 1U], bpf_buffers[chan - 1U]);
         bpf_cycles += (DWTService_GetCycles() - t_bpf_start);
 
+        uint32_t t_demod_start = DWTService_GetCycles();
+        Receiver_IQDemodulator(bpf_buffers[chan - 1U], iq_buffers[chan - 1U], demod_buffers[chan - 1U]);
+        demod_cycles += (DWTService_GetCycles() - t_demod_start);
+
+        /* Tạm thời comment đoạn xử lý matched filter */
+        /*
         uint32_t t_mfilt_start = DWTService_GetCycles();
 #if defined(USE_FFT_MATCHED_FILTER)
         Receiver_MatchedFilterFFT(bpf_buffers[chan - 1U], filtered_buffers[chan - 1U]);
@@ -454,14 +619,19 @@ void Receiver_Process(void)
         Receiver_MatchedFilter(bpf_buffers[chan - 1U], filtered_buffers[chan - 1U]);
 #endif
         mfilt_cycles += (DWTService_GetCycles() - t_mfilt_start);
+        */
 #else
         ADCService_ReadFrame(chan, adc_buffers[chan - 1U]);
         Receiver_BPF(adc_buffers[chan - 1U], bpf_buffers[chan - 1U]);
+        Receiver_IQDemodulator(bpf_buffers[chan - 1U], iq_buffers[chan - 1U], demod_buffers[chan - 1U]);
+        /* Tạm thời comment đoạn xử lý matched filter */
+        /*
 #if defined(USE_FFT_MATCHED_FILTER)
         Receiver_MatchedFilterFFT(bpf_buffers[chan - 1U], filtered_buffers[chan - 1U]);
 #else
         Receiver_MatchedFilter(bpf_buffers[chan - 1U], filtered_buffers[chan - 1U]);
 #endif
+        */
 #endif
     }
 
@@ -469,7 +639,7 @@ void Receiver_Process(void)
 #ifdef SHOW_TIMING_LOG
     uint32_t t_send_start = DWTService_GetCycles();
 #endif
-    Receiver_SendFrame(adc_buffers, bpf_buffers, filtered_buffers);
+    Receiver_SendFrame(adc_buffers, bpf_buffers, demod_buffers, filtered_buffers);
 #ifdef SHOW_TIMING_LOG
     send_cycles = DWTService_GetCycles() - t_send_start;
     total_cycles = DWTService_GetCycles() - t_start;

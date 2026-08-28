@@ -10,7 +10,8 @@ typedef enum
 {
   COMMGR_STREAM_RAW = 0U,
   COMMGR_STREAM_BPF,
-  COMMGR_STREAM_COMPRESSED
+  COMMGR_STREAM_COMPRESSED,
+  COMMGR_STREAM_DEMODULATED
 } ComMgr_StreamMode;
 
 // Cấu hình Baud Rate cho UART truyền nhận dữ liệu

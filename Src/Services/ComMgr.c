@@ -43,6 +43,10 @@ static void ComMgr_OnUartByteReceived(uint8_t character)
             {
                 stream_mode = COMMGR_STREAM_COMPRESSED;
             }
+            else if (strcmp(rx_command, "mode:demod") == 0 || strcmp(rx_command, "mode:demodulated") == 0)
+            {
+                stream_mode = COMMGR_STREAM_DEMODULATED;
+            }
             rx_command_length = 0U;
         }
     }
