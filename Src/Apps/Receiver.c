@@ -234,7 +234,7 @@ void Receiver_LPF(const int32_t *input, int32_t *output, uint32_t state_id)
         s2_y2 = s2_y1;
         s2_y1 = y2_val;
 
-        output[n] = (int32_t)lrintf(y2_val);
+        output[n] = (int32_t)y2_val;
     }
 
     st[0] = s1_x1; st[1] = s1_x2; st[2] = s1_y1; st[3] = s1_y2;
@@ -272,12 +272,18 @@ void Receiver_IQDemodulator(const int16_t *input, Complex_q31 *iq_output, int16_
     uint32_t state_id_q = chan_idx * 2U + 1U;
 
     /* Bước 1: Trộn tần số hạ dải (Down-mixing về Baseband) dạng int32 fixed-point */
+    uint32_t lut_idx = 0U;
     for (uint32_t n = 0U; n < ADC_FRAME_SAMPLE_COUNT; n++)
     {
         int32_t x = (int32_t)input[n] - ADC_BIAS;
-        uint32_t lut_idx = n % 12U;
         int32_t cos_val = (int32_t)cos_carrier_lut_q15[lut_idx];
         int32_t sin_val = (int32_t)sin_carrier_lut_q15[lut_idx];
+
+        lut_idx++;
+        if (lut_idx >= 12U)
+        {
+            lut_idx = 0U;
+        }
 
         /* Nhân với 2 và chia cho 32768 (Q15): (x * cos_val * 2) >> 15 = (x * cos_val) >> 14 */
         mix_i[n] = (x * cos_val) >> 14;
@@ -303,9 +309,9 @@ void Receiver_IQDemodulator(const int16_t *input, Complex_q31 *iq_output, int16_
     {
         for (uint32_t n = 0U; n < ADC_FRAME_SAMPLE_COUNT; n++)
         {
-            int64_t i_val = (int64_t)lpf_i[n];
-            int64_t q_val = (int64_t)lpf_q[n];
-            int32_t env = (int32_t)sqrtf((float)(i_val * i_val + q_val * q_val));
+            float fi = (float)lpf_i[n];
+            float fq = (float)lpf_q[n];
+            int32_t env = (int32_t)sqrtf(fi * fi + fq * fq);
             int32_t result = env + ADC_BIAS;
             mag_output[n] = (int16_t)__USAT(result, 12U);
         }
