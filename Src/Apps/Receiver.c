@@ -1,6 +1,8 @@
 #include "Receiver.h"
 #include <string.h>
 #include <math.h>
+#include "arm_math.h"
+#include "arm_const_structs.h"
 
 #include "ADCService.h"
 #include "ComMgr.h"
@@ -30,13 +32,7 @@ static int16_t filtered1_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((ali
 static int16_t filtered2_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
 
 #define BPF_NUM_STAGES 2U
-static const float bpf_coeffs[BPF_NUM_STAGES * 5U] = {
-    /* Stage 1: b0, b1, b2, -a1, -a2 */
-    0.01440144f, -0.02880288f, 0.01440144f, -1.47902943f, -0.80560112f,
-    /* Stage 2: b0, b1, b2, -a1, -a2 */
-    1.00000000f,  2.00000000f,  1.00000000f, -1.69438393f, -0.85724673f
-};
-static float bpf_state[2][BPF_NUM_STAGES * 4U];
+static int32_t bpf_state_fx[2][BPF_NUM_STAGES * 4U];
 
 #define LPF_NUM_STAGES 2U
 #define LPF_NUM_CHANNELS 4U  /* 0: Ch1_I, 1: Ch1_Q, 2: Ch2_I, 3: Ch2_Q */
@@ -109,7 +105,7 @@ void Receiver_Init(void)
     ADCService_Init(1U);
     ADCService_Init(2U);
 
-    memset(bpf_state, 0, sizeof(bpf_state));
+    memset(bpf_state_fx, 0, sizeof(bpf_state_fx));
     memset(lpf_state_float, 0, sizeof(lpf_state_float));
 
     FFT_InitCMSIS();
@@ -122,14 +118,23 @@ void Receiver_Init(void)
     receiver_frame[5] = (uint8_t)((ADC_FRAME_SAMPLE_COUNT >> 8U) & 0xFFU);
 }
 
+/*
+ * Đóng gói hệ số vào các cặp 32-bit (chứa 2 hệ số int16_t) để tận dụng lệnh SIMD __SMLAD:
+ *   __SMLAD(val1, val2, acc): nhân đồng thời 2 cặp 16-bit và cộng dồn vào thanh ghi 32-bit trong 1 chu kỳ.
+ */
+static const uint32_t bpf_h1_b1b2 = ((uint32_t)(uint16_t)(-472)) | (((uint32_t)(uint16_t)236) << 16U);
+static const uint32_t bpf_h1_a1a2 = ((uint32_t)(uint16_t)(-24232)) | (((uint32_t)(uint16_t)(-13199)) << 16U);
+
+static const uint32_t bpf_h2_b1b2 = ((uint32_t)(uint16_t)32767) | (((uint32_t)(uint16_t)16384) << 16U);
+static const uint32_t bpf_h2_a1a2 = ((uint32_t)(uint16_t)(-27761)) | (((uint32_t)(uint16_t)(-14045)) << 16U);
+
 /**
- * @brief Bộ lọc thông dải số (Bandpass Filter) IIR Butterworth bậc 4 (38 - 42 kHz @ Fs = 96 kHz)
+ * @brief Bộ lọc thông dải số (Bandpass Filter) SIMD Q14/Q15 trên ARM Cortex-M33
  * @details 
- *  - Cấu trúc: 2 tầng Biquad nối tầng (Cascaded Direct Form I SOS - Second Order Sections).
- *  - Dải thông: 38.0 kHz đến 42.0 kHz tại tần số lấy mẫu Fs = 96.0 kHz.
- *  - Phương trình sai phân cho mỗi tầng:
- *      y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] + (-a1)*y[n-1] + (-a2)*y[n-2]
- *  - Tự động nhận diện buffer input (kênh 1 hoặc kênh 2) để lưu trạng thái trễ riêng biệt giữa các frame.
+ *  - Sử dụng lệnh SIMD ghép đôi __SMLAD (Signed Multiply and Add Dual) thực thi 2 phép nhân 16-bit 
+ *    và cộng dồn vào accumulator 32-bit chỉ trong 1 chu kỳ clock.
+ *  - Đóng gói các biến trạng thái theo từng cặp (x1, x2) và (y1, y2) trong word 32-bit.
+ *  - Mở rộng vòng lặp unroll 4x tối ưu thông lượng pipeline CPU.
  * 
  * @param input Con trỏ mảng mẫu thô đầu vào từ ADC (2048 mẫu, 12-bit)
  * @param output Con trỏ mảng mẫu kết quả sau lọc (2048 mẫu, 12-bit)
@@ -141,47 +146,109 @@ void Receiver_BPF(const int16_t *input, int16_t *output)
         return;
     }
 
-    /* Xác định kênh dựa trên địa chỉ buffer đầu vào để lưu state trễ riêng */
     uint32_t idx = (input == adc2_frame_buffer) ? 1U : 0U;
-    float *st = bpf_state[idx];
+    int32_t *st = bpf_state_fx[idx];
 
-    /* Tải trạng thái trễ của tầng 1 và tầng 2 vào thanh ghi để tối ưu tốc độ */
-    float s1_x1 = st[0], s1_x2 = st[1], s1_y1 = st[2], s1_y2 = st[3];
-    float s2_x1 = st[4], s2_x2 = st[5], s2_y1 = st[6], s2_y2 = st[7];
+    /* Tải các biến trạng thái vào CPU registers */
+    int32_t s1_x1 = st[0], s1_x2 = st[1], s1_y1 = st[2], s1_y2 = st[3];
+    int32_t s2_x1 = st[4], s2_x2 = st[5], s2_y1 = st[6], s2_y2 = st[7];
 
-    /* Hệ số SOS Biquad tầng 1 */
-    const float b0_1 = bpf_coeffs[0], b1_1 = bpf_coeffs[1], b2_1 = bpf_coeffs[2];
-    const float a1_1 = bpf_coeffs[3], a2_1 = bpf_coeffs[4];
+    const uint32_t h1_b1b2 = bpf_h1_b1b2;
+    const uint32_t h1_a1a2 = bpf_h1_a1a2;
+    const uint32_t h2_b1b2 = bpf_h2_b1b2;
+    const uint32_t h2_a1a2 = bpf_h2_a1a2;
 
-    /* Hệ số SOS Biquad tầng 2 */
-    const float b0_2 = bpf_coeffs[5], b1_2 = bpf_coeffs[6], b2_2 = bpf_coeffs[7];
-    const float a1_2 = bpf_coeffs[8], a2_2 = bpf_coeffs[9];
-
-    for (uint32_t n = 0U; n < ADC_FRAME_SAMPLE_COUNT; n++)
+    for (uint32_t n = 0U; n < ADC_FRAME_SAMPLE_COUNT; n += 4U)
     {
-        /* 1. Trừ mức phân cực một chiều ADC_BIAS (2048) để chuyển về tín hiệu xoay chiều quanh 0 */
-        float x0 = (float)((int32_t)input[n] - ADC_BIAS);
+        /* ===== Mẫu 1 (n) ===== */
+        int32_t x0_0 = (int32_t)input[n] - ADC_BIAS;
+        uint32_t s1_x1x2_0 = ((uint32_t)(uint16_t)s1_x1) | (((uint32_t)(uint16_t)s1_x2) << 16U);
+        uint32_t s1_y1y2_0 = ((uint32_t)(uint16_t)s1_y1) | (((uint32_t)(uint16_t)s1_y2) << 16U);
+        
+        int32_t acc1_0 = 236 * x0_0;
+        acc1_0 = (int32_t)__SMLAD(s1_x1x2_0, h1_b1b2, (uint32_t)acc1_0);
+        acc1_0 = (int32_t)__SMLAD(s1_y1y2_0, h1_a1a2, (uint32_t)acc1_0);
+        int32_t y1_0 = acc1_0 >> 14;
+        s1_x2 = s1_x1; s1_x1 = x0_0;
+        s1_y2 = s1_y1; s1_y1 = y1_0;
 
-        /* 2. Lọc Biquad Tầng 1 */
-        float y1_val = b0_1 * x0 + b1_1 * s1_x1 + b2_1 * s1_x2 + a1_1 * s1_y1 + a2_1 * s1_y2;
-        s1_x2 = s1_x1;
-        s1_x1 = x0;
-        s1_y2 = s1_y1;
-        s1_y1 = y1_val;
+        uint32_t s2_x1x2_0 = ((uint32_t)(uint16_t)s2_x1) | (((uint32_t)(uint16_t)s2_x2) << 16U);
+        uint32_t s2_y1y2_0 = ((uint32_t)(uint16_t)s2_y1) | (((uint32_t)(uint16_t)s2_y2) << 16U);
+        int32_t acc2_0 = 16384 * y1_0;
+        acc2_0 = (int32_t)__SMLAD(s2_x1x2_0, h2_b1b2, (uint32_t)acc2_0);
+        acc2_0 = (int32_t)__SMLAD(s2_y1y2_0, h2_a1a2, (uint32_t)acc2_0);
+        int32_t y2_0 = acc2_0 >> 14;
+        s2_x2 = s2_x1; s2_x1 = y1_0;
+        s2_y2 = s2_y1; s2_y1 = y2_0;
+        output[n] = (int16_t)__USAT(y2_0 + ADC_BIAS, 12U);
 
-        /* 3. Lọc Biquad Tầng 2 (Nhận ngõ ra của Tầng 1 làm ngõ vào) */
-        float y2_val = b0_2 * y1_val + b1_2 * s2_x1 + b2_2 * s2_x2 + a1_2 * s2_y1 + a2_2 * s2_y2;
-        s2_x2 = s2_x1;
-        s2_x1 = y1_val;
-        s2_y2 = s2_y1;
-        s2_y1 = y2_val;
+        /* ===== Mẫu 2 (n + 1) ===== */
+        int32_t x0_1 = (int32_t)input[n + 1U] - ADC_BIAS;
+        uint32_t s1_x1x2_1 = ((uint32_t)(uint16_t)s1_x1) | (((uint32_t)(uint16_t)s1_x2) << 16U);
+        uint32_t s1_y1y2_1 = ((uint32_t)(uint16_t)s1_y1) | (((uint32_t)(uint16_t)s1_y2) << 16U);
+        
+        int32_t acc1_1 = 236 * x0_1;
+        acc1_1 = (int32_t)__SMLAD(s1_x1x2_1, h1_b1b2, (uint32_t)acc1_1);
+        acc1_1 = (int32_t)__SMLAD(s1_y1y2_1, h1_a1a2, (uint32_t)acc1_1);
+        int32_t y1_1 = acc1_1 >> 14;
+        s1_x2 = s1_x1; s1_x1 = x0_1;
+        s1_y2 = s1_y1; s1_y1 = y1_1;
 
-        /* 4. Khôi phục lại mức phân cực ADC_BIAS và bão hòa an toàn trong dải 12-bit [0, 4095] */
-        int32_t result = (int32_t)y2_val + ADC_BIAS;
-        output[n] = (int16_t)__USAT(result, 12U);
+        uint32_t s2_x1x2_1 = ((uint32_t)(uint16_t)s2_x1) | (((uint32_t)(uint16_t)s2_x2) << 16U);
+        uint32_t s2_y1y2_1 = ((uint32_t)(uint16_t)s2_y1) | (((uint32_t)(uint16_t)s2_y2) << 16U);
+        int32_t acc2_1 = 16384 * y1_1;
+        acc2_1 = (int32_t)__SMLAD(s2_x1x2_1, h2_b1b2, (uint32_t)acc2_1);
+        acc2_1 = (int32_t)__SMLAD(s2_y1y2_1, h2_a1a2, (uint32_t)acc2_1);
+        int32_t y2_1 = acc2_1 >> 14;
+        s2_x2 = s2_x1; s2_x1 = y1_1;
+        s2_y2 = s2_y1; s2_y1 = y2_1;
+        output[n + 1U] = (int16_t)__USAT(y2_1 + ADC_BIAS, 12U);
+
+        /* ===== Mẫu 3 (n + 2) ===== */
+        int32_t x0_2 = (int32_t)input[n + 2U] - ADC_BIAS;
+        uint32_t s1_x1x2_2 = ((uint32_t)(uint16_t)s1_x1) | (((uint32_t)(uint16_t)s1_x2) << 16U);
+        uint32_t s1_y1y2_2 = ((uint32_t)(uint16_t)s1_y1) | (((uint32_t)(uint16_t)s1_y2) << 16U);
+        
+        int32_t acc1_2 = 236 * x0_2;
+        acc1_2 = (int32_t)__SMLAD(s1_x1x2_2, h1_b1b2, (uint32_t)acc1_2);
+        acc1_2 = (int32_t)__SMLAD(s1_y1y2_2, h1_a1a2, (uint32_t)acc1_2);
+        int32_t y1_2 = acc1_2 >> 14;
+        s1_x2 = s1_x1; s1_x1 = x0_2;
+        s1_y2 = s1_y1; s1_y1 = y1_2;
+
+        uint32_t s2_x1x2_2 = ((uint32_t)(uint16_t)s2_x1) | (((uint32_t)(uint16_t)s2_x2) << 16U);
+        uint32_t s2_y1y2_2 = ((uint32_t)(uint16_t)s2_y1) | (((uint32_t)(uint16_t)s2_y2) << 16U);
+        int32_t acc2_2 = 16384 * y1_2;
+        acc2_2 = (int32_t)__SMLAD(s2_x1x2_2, h2_b1b2, (uint32_t)acc2_2);
+        acc2_2 = (int32_t)__SMLAD(s2_y1y2_2, h2_a1a2, (uint32_t)acc2_2);
+        int32_t y2_2 = acc2_2 >> 14;
+        s2_x2 = s2_x1; s2_x1 = y1_2;
+        s2_y2 = s2_y1; s2_y1 = y2_2;
+        output[n + 2U] = (int16_t)__USAT(y2_2 + ADC_BIAS, 12U);
+
+        /* ===== Mẫu 4 (n + 3) ===== */
+        int32_t x0_3 = (int32_t)input[n + 3U] - ADC_BIAS;
+        uint32_t s1_x1x2_3 = ((uint32_t)(uint16_t)s1_x1) | (((uint32_t)(uint16_t)s1_x2) << 16U);
+        uint32_t s1_y1y2_3 = ((uint32_t)(uint16_t)s1_y1) | (((uint32_t)(uint16_t)s1_y2) << 16U);
+        
+        int32_t acc1_3 = 236 * x0_3;
+        acc1_3 = (int32_t)__SMLAD(s1_x1x2_3, h1_b1b2, (uint32_t)acc1_3);
+        acc1_3 = (int32_t)__SMLAD(s1_y1y2_3, h1_a1a2, (uint32_t)acc1_3);
+        int32_t y1_3 = acc1_3 >> 14;
+        s1_x2 = s1_x1; s1_x1 = x0_3;
+        s1_y2 = s1_y1; s1_y1 = y1_3;
+
+        uint32_t s2_x1x2_3 = ((uint32_t)(uint16_t)s2_x1) | (((uint32_t)(uint16_t)s2_x2) << 16U);
+        uint32_t s2_y1y2_3 = ((uint32_t)(uint16_t)s2_y1) | (((uint32_t)(uint16_t)s2_y2) << 16U);
+        int32_t acc2_3 = 16384 * y1_3;
+        acc2_3 = (int32_t)__SMLAD(s2_x1x2_3, h2_b1b2, (uint32_t)acc2_3);
+        acc2_3 = (int32_t)__SMLAD(s2_y1y2_3, h2_a1a2, (uint32_t)acc2_3);
+        int32_t y2_3 = acc2_3 >> 14;
+        s2_x2 = s2_x1; s2_x1 = y1_3;
+        s2_y2 = s2_y1; s2_y1 = y2_3;
+        output[n + 3U] = (int16_t)__USAT(y2_3 + ADC_BIAS, 12U);
     }
 
-    /* Lưu lại trạng thái trễ để lọc tiếp tục liền mạch cho frame kế tiếp */
     st[0] = s1_x1; st[1] = s1_x2; st[2] = s1_y1; st[3] = s1_y2;
     st[4] = s2_x1; st[5] = s2_x2; st[6] = s2_y1; st[7] = s2_y2;
 }

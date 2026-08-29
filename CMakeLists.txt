@@ -78,6 +78,8 @@ set(SOURCES
     Src/Drivers/CMSIS/DSP/Source/CommonTables/arm_const_structs.c
     Src/Drivers/CMSIS/DSP/Source/ComplexMathFunctions/arm_cmplx_mult_cmplx_f32.c
     Src/Drivers/CMSIS/DSP/Source/ComplexMathFunctions/arm_cmplx_mag_f32.c
+    Src/Drivers/CMSIS/DSP/Source/FilteringFunctions/arm_biquad_cascade_df1_f32.c
+    Src/Drivers/CMSIS/DSP/Source/FilteringFunctions/arm_biquad_cascade_df1_init_f32.c
 )
 
 # Include directories
