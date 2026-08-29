@@ -18,8 +18,9 @@
 
 #define ADC_BIAS 2048
 #define RECEIVER_NUM_CHANNELS 2U
-#define USE_FFT_MATCHED_FILTER 1
+#define USE_FFT_MATCHED_FILTER 0
 
+/* Buffer gửi UART luôn cấp đủ cho khung lớn nhất (2048 mẫu * 2 byte + header) */
 static uint8_t receiver_frame[RECEIVER_FRAME_SIZE] __attribute__((aligned(4)));
 static int16_t adc1_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
 static int16_t adc2_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
@@ -29,12 +30,15 @@ static Complex_q31 iq1_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((align
 static Complex_q31 iq2_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(8)));
 static Complex_q31 ds_iq1_frame_buffer[RECEIVER_DOWNSAMPLED_SAMPLE_COUNT] __attribute__((aligned(8)));
 static Complex_q31 ds_iq2_frame_buffer[RECEIVER_DOWNSAMPLED_SAMPLE_COUNT] __attribute__((aligned(8)));
+static Complex_q31 filtered_iq1_frame_buffer[RECEIVER_DOWNSAMPLED_SAMPLE_COUNT] __attribute__((aligned(8)));
+static Complex_q31 filtered_iq2_frame_buffer[RECEIVER_DOWNSAMPLED_SAMPLE_COUNT] __attribute__((aligned(8)));
 static int16_t demod1_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
 static int16_t demod2_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
 static int16_t ds1_frame_buffer[RECEIVER_DOWNSAMPLED_SAMPLE_COUNT] __attribute__((aligned(4)));
 static int16_t ds2_frame_buffer[RECEIVER_DOWNSAMPLED_SAMPLE_COUNT] __attribute__((aligned(4)));
-static int16_t filtered1_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
-static int16_t filtered2_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
+static int16_t filtered1_frame_buffer[RECEIVER_DOWNSAMPLED_SAMPLE_COUNT] __attribute__((aligned(4)));
+static int16_t filtered2_frame_buffer[RECEIVER_DOWNSAMPLED_SAMPLE_COUNT] __attribute__((aligned(4)));
+static uint32_t last_cmplx_fft_ref_len = 0U;
 
 #define BPF_NUM_STAGES 2U
 static int32_t bpf_state_fx[2][BPF_NUM_STAGES * 4U];
@@ -112,6 +116,7 @@ void Receiver_Init(void)
 
     memset(bpf_state_fx, 0, sizeof(bpf_state_fx));
     memset(lpf_state_float, 0, sizeof(lpf_state_float));
+    last_cmplx_fft_ref_len = 0U;
 
     FFT_InitCMSIS();
 
@@ -446,201 +451,226 @@ void Receiver_DownSampling(const Complex_q31 *input, Complex_q31 *output, int16_
     }
 }
 
-static int16_t h_coeffs[TRANSMITTER_LFM_LENGTH] __attribute__((aligned(4)));
-static uint32_t last_ref_len = 0U;
-static const uint16_t *last_waveform_ptr = NULL;
-static int16_t in_biased[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
+/* ========================================================================= */
+/*                     COMPLEX MATCHED FILTER (TIME DOMAIN)                  */
+/* ========================================================================= */
 
-void Receiver_MatchedFilter(const int16_t *input, int16_t *output)
+#define DOWNSAMPLED_LFM_LENGTH    (TRANSMITTER_LFM_LENGTH / RECEIVER_DOWNSAMPLE_RATIO)       /* 18 mẫu */
+#define DOWNSAMPLED_SINGLE_LENGTH (TRANSMITTER_SINGLE_LENGTH / RECEIVER_DOWNSAMPLE_RATIO)    /* 3 mẫu */
+
+/* Mẫu phát tín hiệu LFM phức sau giải điều chế IQ và Downsampling (18 mẫu @ 6 kHz) */
+static const Complex_q31 ref_lfm_template[DOWNSAMPLED_LFM_LENGTH] = {
+    {      0,       0}, /* [00] */
+    {     96,      41}, /* [01] */
+    {    902,     116}, /* [02] */
+    {   1696,    -532}, /* [03] */
+    {    853,   -1648}, /* [04] */
+    {   -712,   -1855}, /* [05] */
+    {  -1695,   -1067}, /* [06] */
+    {  -1986,     -63}, /* [07] */
+    {  -1869,     726}, /* [08] */
+    {  -1591,    1226}, /* [09] */
+    {  -1356,    1477}, /* [10] */
+    {  -1275,    1540}, /* [11] */
+    {  -1368,    1449}, /* [12] */
+    {  -1597,    1175}, /* [13] */
+    {  -1856,     655}, /* [14] */
+    {  -1947,    -136}, /* [15] */
+    {  -1603,   -1079}, /* [16] */
+    {   -641,   -1801}  /* [17] */
+};
+
+/* Mẫu phát tín hiệu đơn xung phức sau giải điều chế IQ và Downsampling (3 mẫu @ 6 kHz) */
+static const Complex_q31 ref_single_template[DOWNSAMPLED_SINGLE_LENGTH] = {
+    {     68,     154}, /* [00] */
+    {    792,    1817}, /* [01] */
+    {    740,    1702}  /* [02] */
+};
+
+/**
+ * @brief Bộ lọc phối hợp miền thời gian trên tín hiệu số phức I/Q sau Downsampling
+ * @details
+ *  - Tương quan phức nhân chập (Complex Cross-Correlation):
+ *      y[n] = sum_{k=0}^{L-1} x[n - L + 1 + k] * conj(s[k])
+ *      y_real = sum (x_r * s_r + x_i * s_i)
+ *      y_imag = sum (x_i * s_r - x_r * s_i)
+ *  - Chuẩn hóa biên độ năng lượng mẫu để giữ nguyên thang đo biên độ của tín hiệu.
+ *  - Xuất ra Complex_q31 (128 mẫu) và int16_t envelope 12-bit (128 mẫu) với bias ADC_BIAS.
+ *
+ * @param input Con trỏ mảng 128 mẫu số phức I/Q đầu vào (ds_iq_buffers)
+ * @param output Con trỏ mảng 128 mẫu số phức I/Q đầu ra
+ * @param mag_output Con trỏ mảng 128 mẫu biên độ bao 12-bit đầu ra
+ */
+void Receiver_MatchedFilter(const Complex_q31 *input, Complex_q31 *output, int16_t *mag_output)
 {
-    const uint16_t *ref_waveform = NULL;
-    uint32_t ref_len = Transmitter_GetActiveWaveform(&ref_waveform);
-
-    if (input == NULL || output == NULL || ref_waveform == NULL || ref_len == 0U)
+    if (input == NULL)
     {
         return;
     }
 
-    /* Template h_coeffs[k] = ref_waveform[k] - ADC_BIAS để có thể tính tích chập x[n - ref_len + 1 + k] * h[k] */
-    if (ref_len != last_ref_len || ref_waveform != last_waveform_ptr)
+    const uint16_t *ref_waveform = NULL;
+    uint32_t raw_ref_len = Transmitter_GetActiveWaveform(&ref_waveform);
+    const Complex_q31 *template_ptr = ref_single_template;
+    uint32_t ref_len = DOWNSAMPLED_SINGLE_LENGTH;
+
+    if (raw_ref_len == TRANSMITTER_LFM_LENGTH)
     {
-        for (uint32_t i = 0U; i < ref_len; i++)
-        {
-            h_coeffs[i] = (int16_t)((int32_t)ref_waveform[i] - ADC_BIAS);
-        }
-        last_ref_len = ref_len;
-        last_waveform_ptr = ref_waveform;
+        template_ptr = ref_lfm_template;
+        ref_len = DOWNSAMPLED_LFM_LENGTH;
     }
 
-    /* Bước 1: Trừ ADC_BIAS trước một lần duy nhất cho toàn bộ frame bằng SIMD __SSUB16 */
-    const uint32_t *in_u32 = (const uint32_t *)(const void *)input;
-    uint32_t *biased_u32 = (uint32_t *)(void *)in_biased;
-    const uint32_t bias_pair = ((uint32_t)(uint16_t)ADC_BIAS) | (((uint32_t)(uint16_t)ADC_BIAS) << 16U);
+    /* Chuẩn hóa theo biên độ đỉnh của mẫu phát (2000), bảo toàn tự nhiên độ lợi tích lũy nén xung */
+    const float norm_scale = 1.0f / 2000.0f;
 
-    for (uint32_t i = 0U; i < ADC_FRAME_SAMPLE_COUNT / 2U; i++)
+    for (uint32_t n = 0U; n < RECEIVER_DOWNSAMPLED_SAMPLE_COUNT; n++)
     {
-        biased_u32[i] = __SSUB16(in_u32[i], bias_pair);
-    }
+        int64_t acc_r = 0;
+        int64_t acc_i = 0;
 
-    const int32_t divisor = (int32_t)(ref_len * 1024U);
-    const uint32_t *h_ptr32 = (const uint32_t *)(const void *)h_coeffs;
-
-    /* Bước 2: Đoạn đầu (n < ref_len - 1), tín hiệu chưa đi hết bộ lọc (tích chập từng phần) */
-    for (uint32_t n = 0U; n < ref_len - 1U && n < ADC_FRAME_SAMPLE_COUNT; n++)
-    {
-        int32_t acc = 0;
-        uint32_t k_len = n + 1U;
-        const int16_t *x_ptr = &in_biased[0];
-        const int16_t *h_sub = &h_coeffs[ref_len - k_len];
-
-        uint32_t k = 0U;
-        for (; k + 3U < k_len; k += 4U)
+        for (uint32_t k = 0U; k < ref_len; k++)
         {
-            acc += (int32_t)x_ptr[k] * (int32_t)h_sub[k];
-            acc += (int32_t)x_ptr[k + 1U] * (int32_t)h_sub[k + 1U];
-            acc += (int32_t)x_ptr[k + 2U] * (int32_t)h_sub[k + 2U];
-            acc += (int32_t)x_ptr[k + 3U] * (int32_t)h_sub[k + 3U];
-        }
-        for (; k < k_len; k++)
-        {
-            acc += (int32_t)x_ptr[k] * (int32_t)h_sub[k];
+            int32_t idx = (int32_t)n - (int32_t)ref_len + 1 + (int32_t)k;
+            if (idx >= 0 && idx < (int32_t)RECEIVER_DOWNSAMPLED_SAMPLE_COUNT)
+            {
+                int64_t xr = (int64_t)input[idx].real;
+                int64_t xi = (int64_t)input[idx].imag;
+                int64_t sr = (int64_t)template_ptr[k].real;
+                int64_t si = (int64_t)template_ptr[k].imag;
+
+                /* (xr + j*xi) * (sr - j*si) = (xr*sr + xi*si) + j*(xi*sr - xr*si) */
+                acc_r += (xr * sr + xi * si);
+                acc_i += (xi * sr - xr * si);
+            }
         }
 
-        int32_t scaled = acc / divisor;
-        int32_t result = scaled + ADC_BIAS;
-        output[n] = (int16_t)__USAT(result, 12U);
-    }
+        float out_r_f = (float)acc_r * norm_scale;
+        float out_i_f = (float)acc_i * norm_scale;
 
-    /* Bước 3: Đoạn chính (n >= ref_len - 1), bộ lọc khớp hoàn toàn, sử dụng SIMD kép SMLAD unroll 16 mẫu */
-    const uint32_t pairs = ref_len >> 1U;
-    for (uint32_t n = ref_len - 1U; n < ADC_FRAME_SAMPLE_COUNT; n++)
-    {
-        int32_t acc = 0;
-        const int16_t *x_sub = &in_biased[n - (ref_len - 1U)];
-        const uint32_t *x_ptr32 = (const uint32_t *)(const void *)x_sub;
-
-        /* Unroll 16 mẫu (8 lệnh SMLAD) mỗi vòng lặp */
-        uint32_t j = 0U;
-        for (; j + 7U < pairs; j += 8U)
+        if (output != NULL)
         {
-            acc = (int32_t)__SMLAD(x_ptr32[j],      h_ptr32[j],      (uint32_t)acc);
-            acc = (int32_t)__SMLAD(x_ptr32[j + 1U], h_ptr32[j + 1U], (uint32_t)acc);
-            acc = (int32_t)__SMLAD(x_ptr32[j + 2U], h_ptr32[j + 2U], (uint32_t)acc);
-            acc = (int32_t)__SMLAD(x_ptr32[j + 3U], h_ptr32[j + 3U], (uint32_t)acc);
-            acc = (int32_t)__SMLAD(x_ptr32[j + 4U], h_ptr32[j + 4U], (uint32_t)acc);
-            acc = (int32_t)__SMLAD(x_ptr32[j + 5U], h_ptr32[j + 5U], (uint32_t)acc);
-            acc = (int32_t)__SMLAD(x_ptr32[j + 6U], h_ptr32[j + 6U], (uint32_t)acc);
-            acc = (int32_t)__SMLAD(x_ptr32[j + 7U], h_ptr32[j + 7U], (uint32_t)acc);
-        }
-        for (; j < pairs; j++)
-        {
-            acc = (int32_t)__SMLAD(x_ptr32[j], h_ptr32[j], (uint32_t)acc);
-        }
-        if (ref_len & 1U)
-        {
-            acc += (int32_t)x_sub[ref_len - 1U] * (int32_t)h_coeffs[ref_len - 1U];
+            output[n].real = (int32_t)lroundf(out_r_f);
+            output[n].imag = (int32_t)lroundf(out_i_f);
         }
 
-        int32_t scaled = acc / divisor;
-        int32_t result = scaled + ADC_BIAS;
-        output[n] = (int16_t)__USAT(result, 12U);
+        if (mag_output != NULL)
+        {
+            int32_t env = (int32_t)lroundf(sqrtf(out_r_f * out_r_f + out_i_f * out_i_f));
+            int32_t result = env + ADC_BIAS;
+            mag_output[n] = (int16_t)(uint16_t)__USAT(result, 16U);
+        }
     }
 }
 
 /* ========================================================================= */
-/*                   FREQUENCY DOMAIN MATCHED FILTER (CMSIS-DSP)            */
+/*            FREQUENCY DOMAIN COMPLEX MATCHED FILTER (CMSIS-DSP)            */
 /* ========================================================================= */
-#include "arm_math.h"
-#include "arm_const_structs.h"
+#define CMPLX_FFT_SIZE 256U
 
-#define FFT_SIZE 4096U
-
-static arm_rfft_fast_instance_f32 rfft_instance;
-static bool rfft_initialized = false;
-
-static float fft_in[FFT_SIZE] __attribute__((aligned(4)));
-static float fft_out[FFT_SIZE] __attribute__((aligned(4)));
-static float fft_h_buf[FFT_SIZE] __attribute__((aligned(4)));
-static float fft_x_buf[FFT_SIZE] __attribute__((aligned(4)));
-static float fft_prod[FFT_SIZE] __attribute__((aligned(4)));
-
-static uint32_t last_fft_ref_len = 0U;
-static const uint16_t *last_fft_waveform_ptr = NULL;
+static float cmplx_fft_x[CMPLX_FFT_SIZE * 2U] __attribute__((aligned(4)));
+static float cmplx_fft_h[CMPLX_FFT_SIZE * 2U] __attribute__((aligned(4)));
+static float cmplx_fft_prod[CMPLX_FFT_SIZE * 2U] __attribute__((aligned(4)));
 
 static void FFT_InitCMSIS(void)
 {
-    if (!rfft_initialized)
-    {
-        arm_rfft_fast_init_f32(&rfft_instance, FFT_SIZE);
-        rfft_initialized = true;
-    }
+    /* CFFT instance CMSIS-DSP arm_cfft_sR_f32_len256 là const struct có sẵn */
 }
 
-void Receiver_MatchedFilterFFT(const int16_t *input, int16_t *output)
+/**
+ * @brief Bộ lọc phối hợp miền tần số trên tín hiệu số phức I/Q (CMSIS-DSP 256-point Complex FFT)
+ * @details
+ *  - Biến đổi CFFT 256 điểm trên tín hiệu phức 128 mẫu @ 6 kHz.
+ *  - Nhân chập miền tần số: Y(f) = X(f) * H*(f)
+ *  - Biến đổi ngược CIFFT 256 điểm khôi phục tín hiệu phức miền thời gian.
+ *
+ * @param input Con trỏ mảng 128 mẫu số phức I/Q đầu vào (ds_iq_buffers)
+ * @param output Con trỏ mảng 128 mẫu số phức I/Q đầu ra
+ * @param mag_output Con trỏ mảng 128 mẫu biên độ bao 12-bit đầu ra
+ */
+void Receiver_MatchedFilterFFT(const Complex_q31 *input, Complex_q31 *output, int16_t *mag_output)
 {
-    const uint16_t *ref_waveform = NULL;
-    uint32_t ref_len = Transmitter_GetActiveWaveform(&ref_waveform);
-
-    if (input == NULL || output == NULL || ref_waveform == NULL || ref_len == 0U)
+    if (input == NULL)
     {
         return;
     }
 
-    if (!rfft_initialized)
+    const uint16_t *ref_waveform = NULL;
+    uint32_t raw_ref_len = Transmitter_GetActiveWaveform(&ref_waveform);
+    const Complex_q31 *template_ptr = ref_single_template;
+    uint32_t ref_len = DOWNSAMPLED_SINGLE_LENGTH;
+
+    if (raw_ref_len == TRANSMITTER_LFM_LENGTH)
     {
-        FFT_InitCMSIS();
+        template_ptr = ref_lfm_template;
+        ref_len = DOWNSAMPLED_LFM_LENGTH;
     }
 
-    /* 1. Tiền tính toán phổ liên hợp H*(f) của tín hiệu mẫu khi mẫu thay đổi */
-    if (ref_len != last_fft_ref_len || ref_waveform != last_fft_waveform_ptr)
+    /* 1. Tiền tính phổ liên hợp H*(f) khi dạng sóng phát thay đổi */
+    if (raw_ref_len != last_cmplx_fft_ref_len)
     {
-        memset(fft_in, 0, sizeof(fft_in));
-        for (uint32_t i = 0U; i < ref_len; i++)
+        memset(cmplx_fft_h, 0, sizeof(cmplx_fft_h));
+        for (uint32_t k = 0U; k < ref_len; k++)
         {
-            fft_in[i] = (float)((int32_t)ref_waveform[i] - ADC_BIAS);
+            cmplx_fft_h[2U * k]      = (float)template_ptr[k].real;
+            cmplx_fft_h[2U * k + 1U] = (float)template_ptr[k].imag;
         }
 
-        /* Forward RFFT của mẫu phát */
-        arm_rfft_fast_f32(&rfft_instance, fft_in, fft_h_buf, 0);
+        /* Forward CFFT cho template phát */
+        arm_cfft_f32(&arm_cfft_sR_f32_len256, cmplx_fft_h, 0, 1);
 
-        /* Lấy liên hợp phức: H*(f) = Re(H) - j * Im(H) */
-        for (uint32_t i = 3U; i < FFT_SIZE; i += 2U)
+        /* Liên hợp phức trong miền tần số: H*(f) = Re(H) - j * Im(H) */
+        for (uint32_t k = 0U; k < CMPLX_FFT_SIZE; k++)
         {
-            fft_h_buf[i] = -fft_h_buf[i];
+            cmplx_fft_h[2U * k + 1U] = -cmplx_fft_h[2U * k + 1U];
         }
 
-        last_fft_ref_len = ref_len;
-        last_fft_waveform_ptr = ref_waveform;
+        last_cmplx_fft_ref_len = raw_ref_len;
     }
 
-    /* 2. Nạp tín hiệu vào, trừ bias ADC và zero-pad */
-    for (uint32_t i = 0U; i < ADC_FRAME_SAMPLE_COUNT; i++)
+    /* 2. Nạp tín hiệu thu phức (128 mẫu) và zero-pad đến 256 mẫu */
+    for (uint32_t n = 0U; n < RECEIVER_DOWNSAMPLED_SAMPLE_COUNT; n++)
     {
-        fft_in[i] = (float)((int32_t)input[i] - ADC_BIAS);
+        cmplx_fft_x[2U * n]      = (float)input[n].real;
+        cmplx_fft_x[2U * n + 1U] = (float)input[n].imag;
     }
-    memset(&fft_in[ADC_FRAME_SAMPLE_COUNT], 0, (FFT_SIZE - ADC_FRAME_SAMPLE_COUNT) * sizeof(float));
+    memset(&cmplx_fft_x[RECEIVER_DOWNSAMPLED_SAMPLE_COUNT * 2U], 0, 
+           (CMPLX_FFT_SIZE - RECEIVER_DOWNSAMPLED_SAMPLE_COUNT) * 2U * sizeof(float));
 
-    /* 3. Forward RFFT của tín hiệu thu X(f) */
-    arm_rfft_fast_f32(&rfft_instance, fft_in, fft_x_buf, 0);
+    /* 3. Forward CFFT tín hiệu thu: X(f) */
+    arm_cfft_f32(&arm_cfft_sR_f32_len256, cmplx_fft_x, 0, 1);
 
-    /* 4. Nhân chập miền tần số (Tương quan phức): Y(f) = X(f) * H*(f) */
-    /* Bin DC và Nyquist là số thực thuần */
-    fft_prod[0] = fft_x_buf[0] * fft_h_buf[0];
-    fft_prod[1] = fft_x_buf[1] * fft_h_buf[1];
+    /* 4. Nhân tương quan phức miền tần số: Y(f) = X(f) * H*(f) */
+    arm_cmplx_mult_cmplx_f32(cmplx_fft_x, cmplx_fft_h, cmplx_fft_prod, CMPLX_FFT_SIZE);
 
-    /* Các bin phức từ index 2 đến FFT_SIZE-1 */
-    arm_cmplx_mult_cmplx_f32(&fft_x_buf[2], &fft_h_buf[2], &fft_prod[2], (FFT_SIZE - 2U) / 2U);
+    /* 5. Inverse CFFT khôi phục tín hiệu phức miền thời gian */
+    arm_cfft_f32(&arm_cfft_sR_f32_len256, cmplx_fft_prod, 1, 1);
 
-    /* 5. Inverse RFFT: khôi phục tín hiệu miền thời gian ra buffer riêng fft_out */
-    arm_rfft_fast_f32(&rfft_instance, fft_prod, fft_out, 1);
-
-    /* 6. Chuẩn hóa scale biên độ và khôi phục bias 12-bit ADC */
-    const float scale = 1.0f / (float)(ref_len * 1024U);
-    for (uint32_t n = 0U; n < ADC_FRAME_SAMPLE_COUNT; n++)
+    /* 6. Tính hệ số scale chuẩn hóa năng lượng */
+    float sum_sq = 0.0f;
+    for (uint32_t k = 0U; k < ref_len; k++)
     {
-        float val = fft_out[n] * scale;
-        int32_t result = (int32_t)val + ADC_BIAS;
-        output[n] = (int16_t)__USAT(result, 12U);
+        float sr = (float)template_ptr[k].real;
+        float si = (float)template_ptr[k].imag;
+        sum_sq += (sr * sr + si * si);
+    }
+    const float norm_scale = (sum_sq > 0.0f) ? (2000.0f / sum_sq) : 1.0f;
+
+    for (uint32_t n = 0U; n < RECEIVER_DOWNSAMPLED_SAMPLE_COUNT; n++)
+    {
+        float out_r_f = cmplx_fft_prod[2U * n] * norm_scale;
+        float out_i_f = cmplx_fft_prod[2U * n + 1U] * norm_scale;
+
+        if (output != NULL)
+        {
+            output[n].real = (int32_t)lroundf(out_r_f);
+            output[n].imag = (int32_t)lroundf(out_i_f);
+        }
+
+        if (mag_output != NULL)
+        {
+            int32_t env = (int32_t)lroundf(sqrtf(out_r_f * out_r_f + out_i_f * out_i_f));
+            int32_t result = env + ADC_BIAS;
+            mag_output[n] = (int16_t)__USAT(result, 12U);
+        }
     }
 }
 
@@ -671,6 +701,7 @@ static void Receiver_SendFrame(int16_t *const raw_buffers[2],
     else if (mode == COMMGR_STREAM_COMPRESSED)
     {
         active_buffers = filtered_buffers;
+        sample_count = RECEIVER_DOWNSAMPLED_SAMPLE_COUNT;
     }
 
     const int16_t *send_buf = NULL;
@@ -729,6 +760,7 @@ void Receiver_Process(void)
     Complex_q31 *ds_iq_buffers[2] = {ds_iq1_frame_buffer, ds_iq2_frame_buffer};
     int16_t *demod_buffers[2] = {demod1_frame_buffer, demod2_frame_buffer};
     int16_t *ds_buffers[2] = {ds1_frame_buffer, ds2_frame_buffer};
+    Complex_q31 *filtered_iq_buffers[2] = {filtered_iq1_frame_buffer, filtered_iq2_frame_buffer};
     int16_t *filtered_buffers[2] = {filtered1_frame_buffer, filtered2_frame_buffer};
 
 #ifdef SHOW_TIMING_LOG
@@ -761,29 +793,15 @@ void Receiver_Process(void)
         Receiver_DownSampling(iq_buffers[chan - 1U], ds_iq_buffers[chan - 1U], ds_buffers[chan - 1U]);
         ds_cycles += (DWTService_GetCycles() - t_ds_start);
 
-        /* Tạm thời comment đoạn xử lý matched filter */
-        /*
         uint32_t t_mfilt_start = DWTService_GetCycles();
-#if defined(USE_FFT_MATCHED_FILTER)
-        Receiver_MatchedFilterFFT(bpf_buffers[chan - 1U], filtered_buffers[chan - 1U]);
-#else
-        Receiver_MatchedFilter(bpf_buffers[chan - 1U], filtered_buffers[chan - 1U]);
-#endif
+        Receiver_MatchedFilter(ds_iq_buffers[chan - 1U], filtered_iq_buffers[chan - 1U], filtered_buffers[chan - 1U]);
         mfilt_cycles += (DWTService_GetCycles() - t_mfilt_start);
-        */
 #else
         ADCService_ReadFrame(chan, adc_buffers[chan - 1U]);
         Receiver_BPF(adc_buffers[chan - 1U], bpf_buffers[chan - 1U]);
         Receiver_IQDemodulator(bpf_buffers[chan - 1U], iq_buffers[chan - 1U], demod_buffers[chan - 1U]);
         Receiver_DownSampling(iq_buffers[chan - 1U], ds_iq_buffers[chan - 1U], ds_buffers[chan - 1U]);
-        /* Tạm thời comment đoạn xử lý matched filter */
-        /*
-#if defined(USE_FFT_MATCHED_FILTER)
-        Receiver_MatchedFilterFFT(bpf_buffers[chan - 1U], filtered_buffers[chan - 1U]);
-#else
-        Receiver_MatchedFilter(bpf_buffers[chan - 1U], filtered_buffers[chan - 1U]);
-#endif
-        */
+        Receiver_MatchedFilter(ds_iq_buffers[chan - 1U], filtered_iq_buffers[chan - 1U], filtered_buffers[chan - 1U]);
 #endif
     }
 

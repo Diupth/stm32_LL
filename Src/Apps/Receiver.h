@@ -23,7 +23,7 @@ void Receiver_BPF(const int16_t *input, int16_t *output);
 void Receiver_LPF(const int32_t *input, int32_t *output, uint32_t state_id);
 void Receiver_IQDemodulator(const int16_t *input, Complex_q31 *iq_output, int16_t *mag_output);
 void Receiver_DownSampling(const Complex_q31 *input, Complex_q31 *output, int16_t *mag_output);
-void Receiver_MatchedFilter(const int16_t *input, int16_t *output);
-void Receiver_MatchedFilterFFT(const int16_t *input, int16_t *output);
+void Receiver_MatchedFilter(const Complex_q31 *input, Complex_q31 *output, int16_t *mag_output);
+void Receiver_MatchedFilterFFT(const Complex_q31 *input, Complex_q31 *output, int16_t *mag_output);
 
 #endif /* RECEIVER_H */
