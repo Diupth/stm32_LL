@@ -18,7 +18,7 @@
 
 #define ADC_BIAS 2048
 #define RECEIVER_NUM_CHANNELS 2U
-#define USE_FFT_MATCHED_FILTER 0
+#define USE_FFT_MATCHED_FILTER 1
 
 /* Buffer gửi UART luôn cấp đủ cho khung lớn nhất (2048 mẫu * 2 byte + header) */
 static uint8_t receiver_frame[RECEIVER_FRAME_SIZE] __attribute__((aligned(4)));
@@ -644,15 +644,8 @@ void Receiver_MatchedFilterFFT(const Complex_q31 *input, Complex_q31 *output, in
     /* 5. Inverse CFFT khôi phục tín hiệu phức miền thời gian */
     arm_cfft_f32(&arm_cfft_sR_f32_len256, cmplx_fft_prod, 1, 1);
 
-    /* 6. Tính hệ số scale chuẩn hóa năng lượng */
-    float sum_sq = 0.0f;
-    for (uint32_t k = 0U; k < ref_len; k++)
-    {
-        float sr = (float)template_ptr[k].real;
-        float si = (float)template_ptr[k].imag;
-        sum_sq += (sr * sr + si * si);
-    }
-    const float norm_scale = (sum_sq > 0.0f) ? (2000.0f / sum_sq) : 1.0f;
+    /* 6. Chuẩn hóa theo biên độ đỉnh của mẫu phát (2000), bảo toàn tự nhiên độ lợi tích lũy nén xung */
+    const float norm_scale = 1.0f / 2000.0f;
 
     for (uint32_t n = 0U; n < RECEIVER_DOWNSAMPLED_SAMPLE_COUNT; n++)
     {
@@ -669,7 +662,7 @@ void Receiver_MatchedFilterFFT(const Complex_q31 *input, Complex_q31 *output, in
         {
             int32_t env = (int32_t)lroundf(sqrtf(out_r_f * out_r_f + out_i_f * out_i_f));
             int32_t result = env + ADC_BIAS;
-            mag_output[n] = (int16_t)__USAT(result, 12U);
+            mag_output[n] = (int16_t)(uint16_t)__USAT(result, 16U);
         }
     }
 }
@@ -794,14 +787,22 @@ void Receiver_Process(void)
         ds_cycles += (DWTService_GetCycles() - t_ds_start);
 
         uint32_t t_mfilt_start = DWTService_GetCycles();
+#if (USE_FFT_MATCHED_FILTER == 1)
+        Receiver_MatchedFilterFFT(ds_iq_buffers[chan - 1U], filtered_iq_buffers[chan - 1U], filtered_buffers[chan - 1U]);
+#else
         Receiver_MatchedFilter(ds_iq_buffers[chan - 1U], filtered_iq_buffers[chan - 1U], filtered_buffers[chan - 1U]);
+#endif
         mfilt_cycles += (DWTService_GetCycles() - t_mfilt_start);
 #else
         ADCService_ReadFrame(chan, adc_buffers[chan - 1U]);
         Receiver_BPF(adc_buffers[chan - 1U], bpf_buffers[chan - 1U]);
         Receiver_IQDemodulator(bpf_buffers[chan - 1U], iq_buffers[chan - 1U], demod_buffers[chan - 1U]);
         Receiver_DownSampling(iq_buffers[chan - 1U], ds_iq_buffers[chan - 1U], ds_buffers[chan - 1U]);
+#if (USE_FFT_MATCHED_FILTER == 1)
+        Receiver_MatchedFilterFFT(ds_iq_buffers[chan - 1U], filtered_iq_buffers[chan - 1U], filtered_buffers[chan - 1U]);
+#else
         Receiver_MatchedFilter(ds_iq_buffers[chan - 1U], filtered_iq_buffers[chan - 1U], filtered_buffers[chan - 1U]);
+#endif
 #endif
     }
 
