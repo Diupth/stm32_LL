@@ -47,6 +47,10 @@ static void ComMgr_OnUartByteReceived(uint8_t character)
             {
                 stream_mode = COMMGR_STREAM_DEMODULATED;
             }
+            else if (strcmp(rx_command, "mode:downsampling") == 0 || strcmp(rx_command, "mode:downsample") == 0)
+            {
+                stream_mode = COMMGR_STREAM_DOWNSAMPLING;
+            }
             rx_command_length = 0U;
         }
     }

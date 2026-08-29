@@ -17,6 +17,7 @@
 #define RECEIVER_FRAME_SIZE (RECEIVER_FRAME_HEADER_SIZE + RECEIVER_FRAME_PAYLOAD_SIZE)
 
 #define ADC_BIAS 2048
+#define RECEIVER_NUM_CHANNELS 2U
 #define USE_FFT_MATCHED_FILTER 1
 
 static uint8_t receiver_frame[RECEIVER_FRAME_SIZE] __attribute__((aligned(4)));
@@ -26,8 +27,12 @@ static int16_t bpf1_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(
 static int16_t bpf2_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
 static Complex_q31 iq1_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(8)));
 static Complex_q31 iq2_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(8)));
+static Complex_q31 ds_iq1_frame_buffer[RECEIVER_DOWNSAMPLED_SAMPLE_COUNT] __attribute__((aligned(8)));
+static Complex_q31 ds_iq2_frame_buffer[RECEIVER_DOWNSAMPLED_SAMPLE_COUNT] __attribute__((aligned(8)));
 static int16_t demod1_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
 static int16_t demod2_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
+static int16_t ds1_frame_buffer[RECEIVER_DOWNSAMPLED_SAMPLE_COUNT] __attribute__((aligned(4)));
+static int16_t ds2_frame_buffer[RECEIVER_DOWNSAMPLED_SAMPLE_COUNT] __attribute__((aligned(4)));
 static int16_t filtered1_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
 static int16_t filtered2_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
 
@@ -60,6 +65,7 @@ static uint32_t last_dsp_log_tick = 0U;
 static uint32_t read_cycles = 0U;
 static uint32_t bpf_cycles = 0U;
 static uint32_t demod_cycles = 0U;
+static uint32_t ds_cycles = 0U;
 static uint32_t mfilt_cycles = 0U;
 static uint32_t send_cycles = 0U;
 static uint32_t total_cycles = 0U;
@@ -67,7 +73,6 @@ static uint32_t total_cycles = 0U;
 static void Receiver_SendTimingLog(void)
 {
     uint8_t dsp_frame[40] = {'D', 'S', 'P', '1'};
-    uint32_t accum_us = 0U;
     uint32_t detect_us = 0U;
 
     uint32_t values[9] = {
@@ -78,7 +83,7 @@ static void Receiver_SendTimingLog(void)
         DWTService_CyclesToUs(demod_cycles),
         DWTService_CyclesToUs(mfilt_cycles),
         DWTService_CyclesToUs(send_cycles),
-        accum_us,
+        DWTService_CyclesToUs(ds_cycles),
         detect_us
     };
 
@@ -385,6 +390,62 @@ void Receiver_IQDemodulator(const int16_t *input, Complex_q31 *iq_output, int16_
     }
 }
 
+/**
+ * @brief Giảm tần số lấy mẫu (Downsampling) từ 96 kHz xuống 6 kHz (Factor = 16) trên tín hiệu số phức I/Q
+ * @details 
+ *  - Đầu vào: 2048 mẫu số phức I/Q (Complex_q31) sau Demodulation
+ *  - Đầu ra: 128 mẫu số phức I/Q (Complex_q31) @ 6 kHz (mỗi mẫu là trung bình 16 mẫu I/Q liên tiếp)
+ *  - Đầu ra mag_output: Mảng 128 mẫu biên độ bao 12-bit (với bias ADC_BIAS) phục vụ gửi hiển thị / UART
+ * 
+ * @param input Con trỏ mảng 2048 mẫu số phức I/Q đầu vào
+ * @param output Con trỏ mảng 128 mẫu số phức I/Q đầu ra (có thể NULL nếu không cần)
+ * @param mag_output Con trỏ mảng 128 mẫu biên độ 12-bit đầu ra (có thể NULL nếu không cần)
+ */
+void Receiver_DownSampling(const Complex_q31 *input, Complex_q31 *output, int16_t *mag_output)
+{
+    if (input == NULL)
+    {
+        return;
+    }
+
+    /* Hệ số làm tròn khi chia nguyên bằng phép dịch bit: (RECEIVER_DOWNSAMPLE_RATIO / 2 = 8) */
+    const int32_t round_val = (int32_t)(RECEIVER_DOWNSAMPLE_RATIO >> 1U);
+
+    for (uint32_t i = 0U; i < RECEIVER_DOWNSAMPLED_SAMPLE_COUNT; i++)
+    {
+        /* Vị trí bắt đầu của block 16 mẫu: i * 16 (tương đương i << 4) */
+        uint32_t base = i << RECEIVER_DOWNSAMPLE_SHIFT;
+        int32_t sum_i = 0;
+        int32_t sum_q = 0;
+
+        /* Tính tổng 16 mẫu liên tiếp của thành phần I và Q */
+        for (uint32_t k = 0U; k < RECEIVER_DOWNSAMPLE_RATIO; k++)
+        {
+            sum_i += input[base + k].real;
+            sum_q += input[base + k].imag;
+        }
+
+        /* Lấy trung bình cộng (sum / 16) bằng phép dịch bit kèm làm tròn số học */
+        int32_t avg_i = (sum_i + round_val) >> RECEIVER_DOWNSAMPLE_SHIFT;
+        int32_t avg_q = (sum_q + round_val) >> RECEIVER_DOWNSAMPLE_SHIFT;
+
+        if (output != NULL)
+        {
+            output[i].real = avg_i;
+            output[i].imag = avg_q;
+        }
+
+        if (mag_output != NULL)
+        {
+            float fi = (float)avg_i;
+            float fq = (float)avg_q;
+            int32_t env = (int32_t)sqrtf(fi * fi + fq * fq);
+            int32_t result = env + ADC_BIAS;
+            mag_output[i] = (int16_t)__USAT(result, 12U);
+        }
+    }
+}
+
 static int16_t h_coeffs[TRANSMITTER_LFM_LENGTH] __attribute__((aligned(4)));
 static uint32_t last_ref_len = 0U;
 static const uint16_t *last_waveform_ptr = NULL;
@@ -586,11 +647,13 @@ void Receiver_MatchedFilterFFT(const int16_t *input, int16_t *output)
 static void Receiver_SendFrame(int16_t *const raw_buffers[2],
                                int16_t *const bpf_buffers[2],
                                int16_t *const demod_buffers[2],
+                               int16_t *const ds_buffers[2],
                                int16_t *const filtered_buffers[2])
 {
     uint32_t rx_select = ComMgr_GetRxSelect();
     ComMgr_StreamMode mode = ComMgr_GetStreamMode();
     int16_t *const *active_buffers = raw_buffers;
+    uint32_t sample_count = ADC_FRAME_SAMPLE_COUNT;
 
     if (mode == COMMGR_STREAM_BPF)
     {
@@ -599,6 +662,11 @@ static void Receiver_SendFrame(int16_t *const raw_buffers[2],
     else if (mode == COMMGR_STREAM_DEMODULATED)
     {
         active_buffers = demod_buffers;
+    }
+    else if (mode == COMMGR_STREAM_DOWNSAMPLING)
+    {
+        active_buffers = ds_buffers;
+        sample_count = RECEIVER_DOWNSAMPLED_SAMPLE_COUNT;
     }
     else if (mode == COMMGR_STREAM_COMPRESSED)
     {
@@ -617,7 +685,7 @@ static void Receiver_SendFrame(int16_t *const raw_buffers[2],
         // Rx Sum = (Rx1 + Rx2) / 2
         const int16_t *b1 = active_buffers[0];
         const int16_t *b2 = active_buffers[1];
-        for (uint32_t i = 0U; i < ADC_FRAME_SAMPLE_COUNT; i++)
+        for (uint32_t i = 0U; i < sample_count; i++)
         {
             calc_buf[i] = (int16_t)(((int32_t)b1[i] + (int32_t)b2[i]) / 2);
         }
@@ -628,7 +696,7 @@ static void Receiver_SendFrame(int16_t *const raw_buffers[2],
         // Rx Diff = (Rx1 - Rx2) / 2 + ADC_BIAS
         const int16_t *b1 = active_buffers[0];
         const int16_t *b2 = active_buffers[1];
-        for (uint32_t i = 0U; i < ADC_FRAME_SAMPLE_COUNT; i++)
+        for (uint32_t i = 0U; i < sample_count; i++)
         {
             calc_buf[i] = (int16_t)(((int32_t)b1[i] - (int32_t)b2[i]) / 2 + ADC_BIAS);
         }
@@ -638,8 +706,11 @@ static void Receiver_SendFrame(int16_t *const raw_buffers[2],
     if (send_buf != NULL)
     {
         receiver_frame[3] = (uint8_t)('0' + rx_select);
-        memcpy(&receiver_frame[RECEIVER_FRAME_HEADER_SIZE], send_buf, RECEIVER_FRAME_PAYLOAD_SIZE);
-        ComMgr_SendData(receiver_frame, sizeof(receiver_frame));
+        receiver_frame[4] = (uint8_t)(sample_count & 0xFFU);
+        receiver_frame[5] = (uint8_t)((sample_count >> 8U) & 0xFFU);
+        uint32_t payload_size = sample_count * sizeof(int16_t);
+        memcpy(&receiver_frame[RECEIVER_FRAME_HEADER_SIZE], send_buf, payload_size);
+        ComMgr_SendData(receiver_frame, RECEIVER_FRAME_HEADER_SIZE + payload_size);
     }
 }
 
@@ -655,7 +726,9 @@ void Receiver_Process(void)
     int16_t *adc_buffers[2] = {adc1_frame_buffer, adc2_frame_buffer};
     int16_t *bpf_buffers[2] = {bpf1_frame_buffer, bpf2_frame_buffer};
     Complex_q31 *iq_buffers[2] = {iq1_frame_buffer, iq2_frame_buffer};
+    Complex_q31 *ds_iq_buffers[2] = {ds_iq1_frame_buffer, ds_iq2_frame_buffer};
     int16_t *demod_buffers[2] = {demod1_frame_buffer, demod2_frame_buffer};
+    int16_t *ds_buffers[2] = {ds1_frame_buffer, ds2_frame_buffer};
     int16_t *filtered_buffers[2] = {filtered1_frame_buffer, filtered2_frame_buffer};
 
 #ifdef SHOW_TIMING_LOG
@@ -663,11 +736,12 @@ void Receiver_Process(void)
     read_cycles = 0U;
     bpf_cycles = 0U;
     demod_cycles = 0U;
+    ds_cycles = 0U;
     mfilt_cycles = 0U;
     send_cycles = 0U;
 #endif
 
-    /* 1. Thu thập dữ liệu ADC, lọc BPF, giải điều chế I/Q trên cả 2 kênh thu */
+    /* 1. Thu thập dữ liệu ADC, lọc BPF, giải điều chế I/Q và Downsampling trên cả 2 kênh thu */
     for (uint32_t chan = 1U; chan <= 2U; chan++)
     {
 #ifdef SHOW_TIMING_LOG
@@ -683,6 +757,10 @@ void Receiver_Process(void)
         Receiver_IQDemodulator(bpf_buffers[chan - 1U], iq_buffers[chan - 1U], demod_buffers[chan - 1U]);
         demod_cycles += (DWTService_GetCycles() - t_demod_start);
 
+        uint32_t t_ds_start = DWTService_GetCycles();
+        Receiver_DownSampling(iq_buffers[chan - 1U], ds_iq_buffers[chan - 1U], ds_buffers[chan - 1U]);
+        ds_cycles += (DWTService_GetCycles() - t_ds_start);
+
         /* Tạm thời comment đoạn xử lý matched filter */
         /*
         uint32_t t_mfilt_start = DWTService_GetCycles();
@@ -697,6 +775,7 @@ void Receiver_Process(void)
         ADCService_ReadFrame(chan, adc_buffers[chan - 1U]);
         Receiver_BPF(adc_buffers[chan - 1U], bpf_buffers[chan - 1U]);
         Receiver_IQDemodulator(bpf_buffers[chan - 1U], iq_buffers[chan - 1U], demod_buffers[chan - 1U]);
+        Receiver_DownSampling(iq_buffers[chan - 1U], ds_iq_buffers[chan - 1U], ds_buffers[chan - 1U]);
         /* Tạm thời comment đoạn xử lý matched filter */
         /*
 #if defined(USE_FFT_MATCHED_FILTER)
@@ -712,7 +791,7 @@ void Receiver_Process(void)
 #ifdef SHOW_TIMING_LOG
     uint32_t t_send_start = DWTService_GetCycles();
 #endif
-    Receiver_SendFrame(adc_buffers, bpf_buffers, demod_buffers, filtered_buffers);
+    Receiver_SendFrame(adc_buffers, bpf_buffers, demod_buffers, ds_buffers, filtered_buffers);
 #ifdef SHOW_TIMING_LOG
     send_cycles = DWTService_GetCycles() - t_send_start;
     total_cycles = DWTService_GetCycles() - t_start;
