@@ -32,6 +32,17 @@ static Complex_q31 ds_iq1_frame_buffer[RECEIVER_DOWNSAMPLED_SAMPLE_COUNT] __attr
 static Complex_q31 ds_iq2_frame_buffer[RECEIVER_DOWNSAMPLED_SAMPLE_COUNT] __attribute__((aligned(8)));
 static Complex_q31 filtered_iq1_frame_buffer[RECEIVER_DOWNSAMPLED_SAMPLE_COUNT] __attribute__((aligned(8)));
 static Complex_q31 filtered_iq2_frame_buffer[RECEIVER_DOWNSAMPLED_SAMPLE_COUNT] __attribute__((aligned(8)));
+
+/* 8 mảng phức tổng và 8 mảng phức hiệu sau Matched Filter (mỗi mảng 128 mẫu @ 6 kHz) */
+static Complex_q31 accumulated_sum_pulses[RECEIVER_ACCUMULATED_PULSE_COUNT][RECEIVER_DOWNSAMPLED_SAMPLE_COUNT] __attribute__((aligned(8)));
+static Complex_q31 accumulated_diff_pulses[RECEIVER_ACCUMULATED_PULSE_COUNT][RECEIVER_DOWNSAMPLED_SAMPLE_COUNT] __attribute__((aligned(8)));
+static uint32_t accumulated_pulse_idx = 0U;
+static bool accumulation_complete = false;
+
+/* Ma trận độ lớn Range-Doppler tổng 16x128 (16 slow-time Doppler bins x 128 range bins) dạng uint16 */
+static uint16_t rd_sum_mag_matrix[RECEIVER_DOPPLER_BIN_COUNT][RECEIVER_DOWNSAMPLED_SAMPLE_COUNT] __attribute__((aligned(4)));
+static uint8_t rd_receiver_frame[RECEIVER_FRAME_HEADER_SIZE + RECEIVER_RD_MATRIX_SIZE * sizeof(uint16_t)] __attribute__((aligned(4)));
+
 static int16_t demod1_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
 static int16_t demod2_frame_buffer[ADC_FRAME_SAMPLE_COUNT] __attribute__((aligned(4)));
 static int16_t ds1_frame_buffer[RECEIVER_DOWNSAMPLED_SAMPLE_COUNT] __attribute__((aligned(4)));
@@ -71,13 +82,14 @@ static uint32_t bpf_cycles = 0U;
 static uint32_t demod_cycles = 0U;
 static uint32_t ds_cycles = 0U;
 static uint32_t mfilt_cycles = 0U;
+static uint32_t rd_cycles = 0U;
+static uint32_t last_rd_cycles = 0U;
 static uint32_t send_cycles = 0U;
 static uint32_t total_cycles = 0U;
 
 static void Receiver_SendTimingLog(void)
 {
     uint8_t dsp_frame[40] = {'D', 'S', 'P', '1'};
-    uint32_t detect_us = 0U;
 
     uint32_t values[9] = {
         dsp_log_sequence++,
@@ -88,7 +100,7 @@ static void Receiver_SendTimingLog(void)
         DWTService_CyclesToUs(mfilt_cycles),
         DWTService_CyclesToUs(send_cycles),
         DWTService_CyclesToUs(ds_cycles),
-        detect_us
+        DWTService_CyclesToUs(last_rd_cycles)
     };
 
     for (uint32_t i = 0U; i < 9U; i++)
@@ -105,6 +117,140 @@ static void Receiver_SendTimingLog(void)
 
 static void FFT_InitCMSIS(void);
 
+void Receiver_ResetAccumulation(void)
+{
+    accumulated_pulse_idx = 0U;
+    accumulation_complete = false;
+    memset(accumulated_sum_pulses, 0, sizeof(accumulated_sum_pulses));
+    memset(accumulated_diff_pulses, 0, sizeof(accumulated_diff_pulses));
+}
+
+bool Receiver_IsAccumulationComplete(void)
+{
+    return accumulation_complete;
+}
+
+uint32_t Receiver_GetAccumulatedPulseCount(void)
+{
+    return accumulated_pulse_idx;
+}
+
+const Complex_q31 (*Receiver_GetSumPulses(void))[RECEIVER_DOWNSAMPLED_SAMPLE_COUNT]
+{
+    return (const Complex_q31 (*)[RECEIVER_DOWNSAMPLED_SAMPLE_COUNT])accumulated_sum_pulses;
+}
+
+const Complex_q31 (*Receiver_GetDiffPulses(void))[RECEIVER_DOWNSAMPLED_SAMPLE_COUNT]
+{
+    return (const Complex_q31 (*)[RECEIVER_DOWNSAMPLED_SAMPLE_COUNT])accumulated_diff_pulses;
+}
+
+const uint16_t *Receiver_GetRangeDopplerMagSum(void)
+{
+    return (const uint16_t *)rd_sum_mag_matrix;
+}
+
+/**
+ * @brief Tính ma trận Range-Doppler từ 8 xung phức tổng bằng 8-point Complex FFT dọc theo slow-time
+ * @details
+ *  - Với mỗi Range bin r (0..127): Lấy đúng 8 mẫu phức qua 8 xung [0..7] (không zero-padding).
+ *  - Nhân cửa sổ Hamming 8 điểm để triệt tiêu búp phụ Doppler sidelobes.
+ *  - Thực hiện 8-point Forward Complex FFT trực tiếp (Radix-2 DIT tối ưu FPU Cortex-M33).
+ *  - Áp dụng fftshift: 8 Doppler bins [-4, -3, -2, -1, 0, 1, 2, 3] ứng với bins [4, 5, 6, 7, 0, 1, 2, 3].
+ *  - Tính độ lớn biên độ bao (magnitude) lưu vào rd_sum_mag_matrix[8][128].
+ */
+void Receiver_ComputeRangeDoppler(void)
+{
+    const float SQRT1_2 = 0.7071067811865475f; /* cos(pi/4) / sin(pi/4) */
+    static const float hamming8[8] = {
+        0.08000000f, 0.25319469f, 0.64236894f, 0.95443637f,
+        0.95443637f, 0.64236894f, 0.25319469f, 0.08000000f
+    };
+    static const uint8_t shift_map[8] = {4, 5, 6, 7, 0, 1, 2, 3};
+
+    for (uint32_t r = 0U; r < RECEIVER_DOWNSAMPLED_SAMPLE_COUNT; r++)
+    {
+        /* 1. Nạp 8 mẫu phức và nhân cửa sổ Hamming */
+        float x_r[8];
+        float x_i[8];
+        for (uint32_t p = 0U; p < RECEIVER_ACCUMULATED_PULSE_COUNT; p++)
+        {
+            float w = hamming8[p];
+            x_r[p] = ((float)accumulated_sum_pulses[p][r].real) * w;
+            x_i[p] = ((float)accumulated_sum_pulses[p][r].imag) * w;
+        }
+
+        /* 2. Thực thi 8-point Forward Complex FFT (Radix-2 DIT) */
+        /* Stage 1: 2-point butterflies */
+        float a0_r = x_r[0] + x_r[4], a0_i = x_i[0] + x_i[4];
+        float a1_r = x_r[0] - x_r[4], a1_i = x_i[0] - x_i[4];
+        float a2_r = x_r[2] + x_r[6], a2_i = x_i[2] + x_i[6];
+        float a3_r = x_r[2] - x_r[6], a3_i = x_i[2] - x_i[6];
+        float a4_r = x_r[1] + x_r[5], a4_i = x_i[1] + x_i[5];
+        float a5_r = x_r[1] - x_r[5], a5_i = x_i[1] - x_i[5];
+        float a6_r = x_r[3] + x_r[7], a6_i = x_i[3] + x_i[7];
+        float a7_r = x_r[3] - x_r[7], a7_i = x_i[3] - x_i[7];
+
+        /* Stage 2: 4-point butterflies */
+        float b0_r = a0_r + a2_r, b0_i = a0_i + a2_i;
+        float b1_r = a1_r + a3_i, b1_i = a1_i - a3_r; /* nhân -j */
+        float b2_r = a0_r - a2_r, b2_i = a0_i - a2_i;
+        float b3_r = a1_r - a3_i, b3_i = a1_i + a3_r; /* nhân +j */
+
+        float b4_r = a4_r + a6_r, b4_i = a4_i + a6_i;
+        float b5_r = a5_r + a7_i, b5_i = a5_i - a7_r; /* nhân -j */
+        float b6_r = a4_r - a6_r, b6_i = a4_i - a6_i;
+        float b7_r = a5_r - a7_i, b7_i = a5_i + a7_r; /* nhân +j */
+
+        /* Twiddle nhân với W8^1, W8^2, W8^3 cho nhóm lẻ */
+        /* W8^1 = (1 - j)/sqrt(2) */
+        float t5_r = (b5_r + b5_i) * SQRT1_2;
+        float t5_i = (b5_i - b5_r) * SQRT1_2;
+
+        /* W8^2 = -j */
+        float t6_r = b6_i;
+        float t6_i = -b6_r;
+
+        /* W8^3 = (-1 - j)/sqrt(2) */
+        float t7_r = (-b7_r + b7_i) * SQRT1_2;
+        float t7_i = (-b7_i - b7_r) * SQRT1_2;
+
+        /* Stage 3: Kết hợp 8-point FFT output X[0..7] */
+        float X_r[8], X_i[8];
+        X_r[0] = b0_r + b4_r; X_i[0] = b0_i + b4_i;
+        X_r[1] = b1_r + t5_r; X_i[1] = b1_i + t5_i;
+        X_r[2] = b2_r + t6_r; X_i[2] = b2_i + t6_i;
+        X_r[3] = b3_r + t7_r; X_i[3] = b3_i + t7_i;
+
+        X_r[4] = b0_r - b4_r; X_i[4] = b0_i - b4_i;
+        X_r[5] = b1_r - t5_r; X_i[5] = b1_i - t5_i;
+        X_r[6] = b2_r - t6_r; X_i[6] = b2_i - t6_i;
+        X_r[7] = b3_r - t7_r; X_i[7] = b3_i - t7_i;
+
+        /* 3. FFT Shift và tính độ lớn Magnitude:
+         * 8 Doppler bins đối xứng từ -4 đến +3:
+         * d=0 (Doppler -4) -> X[4]
+         * d=1 (Doppler -3) -> X[5]
+         * d=2 (Doppler -2) -> X[6]
+         * d=3 (Doppler -1) -> X[7]
+         * d=4 (Doppler  0) -> X[0] (0 Hz nằm ở giữa bin 4)
+         * d=5 (Doppler +1) -> X[1]
+         * d=6 (Doppler +2) -> X[2]
+         * d=7 (Doppler +3) -> X[3]
+         */
+        for (uint32_t d = 0U; d < RECEIVER_DOPPLER_BIN_COUNT; d++)
+        {
+            uint8_t k = shift_map[d];
+            float re = X_r[k];
+            float im = X_i[k];
+            float mag = sqrtf(re * re + im * im);
+            /* Chuẩn hóa chia cho 8 (Doppler processing gain) */
+            uint32_t mag_u32 = (uint32_t)lroundf(mag / 8.0f);
+            rd_sum_mag_matrix[d][r] = (uint16_t)__USAT(mag_u32, 16U);
+        }
+    }
+}
+
 void Receiver_Init(void)
 {
 #ifdef SHOW_TIMING_LOG
@@ -117,6 +263,7 @@ void Receiver_Init(void)
     memset(bpf_state_fx, 0, sizeof(bpf_state_fx));
     memset(lpf_state_float, 0, sizeof(lpf_state_float));
     last_cmplx_fft_ref_len = 0U;
+    Receiver_ResetAccumulation();
 
     FFT_InitCMSIS();
 
@@ -126,6 +273,14 @@ void Receiver_Init(void)
     receiver_frame[3] = '1';
     receiver_frame[4] = (uint8_t)(ADC_FRAME_SAMPLE_COUNT & 0xFFU);
     receiver_frame[5] = (uint8_t)((ADC_FRAME_SAMPLE_COUNT >> 8U) & 0xFFU);
+
+    memset(rd_receiver_frame, 0, RECEIVER_FRAME_HEADER_SIZE);
+    rd_receiver_frame[0] = 'F';
+    rd_receiver_frame[1] = 'R';
+    rd_receiver_frame[2] = 'X';
+    rd_receiver_frame[3] = '0';
+    rd_receiver_frame[4] = (uint8_t)(RECEIVER_RD_MATRIX_SIZE & 0xFFU);
+    rd_receiver_frame[5] = (uint8_t)((RECEIVER_RD_MATRIX_SIZE >> 8U) & 0xFFU);
 }
 
 /*
@@ -738,6 +893,19 @@ static void Receiver_SendFrame(int16_t *const raw_buffers[2],
     }
 }
 
+static void Receiver_SendRangeDopplerFrame(void)
+{
+    rd_receiver_frame[0] = 'F';
+    rd_receiver_frame[1] = 'R';
+    rd_receiver_frame[2] = 'X';
+    rd_receiver_frame[3] = '0'; /* '0' = Rx Sum */
+    rd_receiver_frame[4] = (uint8_t)(RECEIVER_RD_MATRIX_SIZE & 0xFFU);
+    rd_receiver_frame[5] = (uint8_t)((RECEIVER_RD_MATRIX_SIZE >> 8U) & 0xFFU);
+    uint32_t payload_size = RECEIVER_RD_MATRIX_SIZE * sizeof(uint16_t);
+    memcpy(&rd_receiver_frame[RECEIVER_FRAME_HEADER_SIZE], rd_sum_mag_matrix, payload_size);
+    ComMgr_SendData(rd_receiver_frame, RECEIVER_FRAME_HEADER_SIZE + payload_size);
+}
+
 void Receiver_Process(void)
 {
     /* Kiểm tra và đồng bộ đủ 2 kênh ADC từ SyncSignalApp trước khi bắt đầu xử lý DSP */
@@ -806,11 +974,59 @@ void Receiver_Process(void)
 #endif
     }
 
-    /* 2. Gửi tín hiệu theo cấu hình Rx select (1 hoặc 2) và Stream Mode */
+    /* 2. Tính tổng và hiệu phức giữa 2 kênh (sau Matched Filter) lưu vào 8 mảng phức tích lũy */
+#ifdef SHOW_TIMING_LOG
+    uint32_t t_rd_start = DWTService_GetCycles();
+#endif
+    for (uint32_t n = 0U; n < RECEIVER_DOWNSAMPLED_SAMPLE_COUNT; n++)
+    {
+        /* Tổng phức 2 kênh: Sum = Ch1 + Ch2 */
+        accumulated_sum_pulses[accumulated_pulse_idx][n].real = filtered_iq1_frame_buffer[n].real + filtered_iq2_frame_buffer[n].real;
+        accumulated_sum_pulses[accumulated_pulse_idx][n].imag = filtered_iq1_frame_buffer[n].imag + filtered_iq2_frame_buffer[n].imag;
+
+        /* Hiệu phức 2 kênh: Diff = Ch1 - Ch2 */
+        accumulated_diff_pulses[accumulated_pulse_idx][n].real = filtered_iq1_frame_buffer[n].real - filtered_iq2_frame_buffer[n].real;
+        accumulated_diff_pulses[accumulated_pulse_idx][n].imag = filtered_iq1_frame_buffer[n].imag - filtered_iq2_frame_buffer[n].imag;
+    }
+
+    accumulated_pulse_idx++;
+    bool rd_ready = false;
+    if (accumulated_pulse_idx >= RECEIVER_ACCUMULATED_PULSE_COUNT)
+    {
+        accumulation_complete = true;
+
+        /* Thực hiện tính toán ma trận Range-Doppler (8-point CFFT theo slow-time) độc lập với stream mode */
+        Receiver_ComputeRangeDoppler();
+        rd_ready = true;
+
+        /* Sau khi xử lý xong đợt 8 xung, reset lại để tích lũy đợt 8 xung tiếp theo */
+        Receiver_ResetAccumulation();
+    }
+#ifdef SHOW_TIMING_LOG
+    rd_cycles = DWTService_GetCycles() - t_rd_start;
+    if (rd_ready)
+    {
+        last_rd_cycles = rd_cycles;
+    }
+#endif
+
+    /* 3. Gửi tín hiệu theo cấu hình Rx select (1 hoặc 2) và Stream Mode */
 #ifdef SHOW_TIMING_LOG
     uint32_t t_send_start = DWTService_GetCycles();
 #endif
-    Receiver_SendFrame(adc_buffers, bpf_buffers, demod_buffers, ds_buffers, filtered_buffers);
+    ComMgr_StreamMode current_mode = ComMgr_GetStreamMode();
+    if (current_mode == COMMGR_STREAM_RANGE_DOPPLER)
+    {
+        /* Ở chế độ Range-Doppler, chỉ gửi ma trận 8x128 khi đủ 8 xung */
+        if (rd_ready)
+        {
+            Receiver_SendRangeDopplerFrame();
+        }
+    }
+    else
+    {
+        Receiver_SendFrame(adc_buffers, bpf_buffers, demod_buffers, ds_buffers, filtered_buffers);
+    }
 #ifdef SHOW_TIMING_LOG
     send_cycles = DWTService_GetCycles() - t_send_start;
     total_cycles = DWTService_GetCycles() - t_start;
@@ -823,6 +1039,6 @@ void Receiver_Process(void)
     }
 #endif
 
-    /* 3. Xử lý truyền thông USB */
+    /* 4. Xử lý truyền thông USB */
     ComMgr_Process();
 }

@@ -51,6 +51,10 @@ static void ComMgr_OnUartByteReceived(uint8_t character)
             {
                 stream_mode = COMMGR_STREAM_DOWNSAMPLING;
             }
+            else if (strcmp(rx_command, "mode:range_doppler") == 0 || strcmp(rx_command, "mode:rd") == 0)
+            {
+                stream_mode = COMMGR_STREAM_RANGE_DOPPLER;
+            }
             rx_command_length = 0U;
         }
     }
