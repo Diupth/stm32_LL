@@ -18,5 +18,6 @@ typedef enum
 void Transmitter_Init(void);
 void Transmitter_SetPulseType(Transmitter_PulseType pulse_type);
 uint32_t Transmitter_GetActiveWaveform(const uint16_t **waveform);
+void Transmitter_Process(void);
 
 #endif /* TRANSMITTER_H */

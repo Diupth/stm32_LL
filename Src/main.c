@@ -34,6 +34,9 @@ int main(void)
 
         // 3. Send periodic synchronization telemetry and heartbeat log (1s)
         SyncSignalApp_Process();
+
+        // 4. Cập nhật nhiễu simulation mỗi frame DAC (no-op ngoài SIMULATION_MODE)
+        Transmitter_Process();
     }
 }
 
