@@ -27,6 +27,7 @@ add_definitions(
     -DSHOW_TIMING_LOG
     # -DSHOW_ADC_DAC_DEBUG
     -DSIMULATION_MODE
+    -DLOG_DEV
 )
 
 # Source files
@@ -48,6 +49,7 @@ set(SOURCES
     Src/Services/SyncSignal.c
     Src/Services/ADCService.c
     Src/Services/DACService.c
+    Src/Services/LogService.c
 
     # Drivers
     Src/Drivers/UARTDriver.c
