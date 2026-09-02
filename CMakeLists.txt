@@ -27,7 +27,9 @@ add_definitions(
     -DSHOW_TIMING_LOG
     # -DSHOW_ADC_DAC_DEBUG
     -DSIMULATION_MODE
+    -DSIMULATION_NOISE
     -DLOG_DEV
+    -DLOG_BUG
 )
 
 # Source files

@@ -1,4 +1,5 @@
 #include "ADCService.h"
+#include "LogService.h"
 #include "stm32h5xx.h"
 
 // ADC acquisition service.
@@ -75,13 +76,30 @@ static void ADCService_CommonInit(
 ) {
     // 1. Enable GPIOA, ADC, and GPDMA1 clocks.
     RCC->AHB2ENR |= RCC_AHB2ENR_GPIOAEN;
-    RCC->AHB2ENR |= RCC_AHB2ENR_ADCEN;
     RCC->AHB1ENR |= RCC_AHB1ENR_GPDMA1EN;
-    (void)RCC->AHB1ENR; // Read-back ensures the peripheral clock is active.
 
-    // Set ADC common clock mode to Synchronous HCLK / 4 (60 MHz)
-    ADC12_COMMON->CCR &= ~ADC_CCR_CKMODE_Msk;
-    ADC12_COMMON->CCR |= (3U << ADC_CCR_CKMODE_Pos);
+    // Reset ADC block on first init to clear any hung state
+    static bool adc_block_reset = false;
+    if (!adc_block_reset)
+    {
+        adc_block_reset = true;
+        RCC->AHB2RSTR |= RCC_AHB2RSTR_ADCRST;
+        __NOP(); __NOP(); __NOP(); __NOP();
+        RCC->AHB2RSTR &= ~RCC_AHB2RSTR_ADCRST;
+
+        RCC->AHB2ENR |= RCC_AHB2ENR_ADCEN;
+        (void)RCC->AHB2ENR; // Read-back ensures the peripheral clock is active.
+
+        // Set ADC common clock mode to Synchronous HCLK / 4 (60 MHz)
+        // MUST only be configured when ALL ADCs in the common group are disabled!
+        ADC12_COMMON->CCR &= ~ADC_CCR_CKMODE_Msk;
+        ADC12_COMMON->CCR |= (3U << ADC_CCR_CKMODE_Pos);
+    }
+    else
+    {
+        RCC->AHB2ENR |= RCC_AHB2ENR_ADCEN;
+        (void)RCC->AHB2ENR;
+    }
 
     // 2. Configure Pin in Analog Mode
     GPIOA->MODER |= (3U << (pin * 2));   // Analog mode for pin
@@ -128,10 +146,17 @@ static void ADCService_CommonInit(
     dma_channel->CCR |= DMA_CCR_EN;
 
     // 4. Configure ADC
+    // Ensure ADC is disabled before calibration
+    if (adc->CR & ADC_CR_ADEN)
+    {
+        adc->CR |= ADC_CR_ADDIS;
+        while (adc->CR & ADC_CR_ADEN) {}
+    }
+
     // Disable Deep Power Down and enable ADC voltage regulator
     adc->CR &= ~ADC_CR_DEEPPWD;
     adc->CR |= ADC_CR_ADVREGEN;
-    HAL_Delay(1);
+    HAL_Delay(2); // ADC voltage regulator startup time (~20us minimum, 2ms is safe)
     
     // Single-ended calibration
     adc->CR &= ~ADC_CR_ADCALDIF;
@@ -139,10 +164,17 @@ static void ADCService_CommonInit(
     uint32_t wait_start = HAL_GetTick();
     while (adc->CR & ADC_CR_ADCAL)
     {
-        if ((HAL_GetTick() - wait_start) > 10U)
+        if ((HAL_GetTick() - wait_start) > 20U)
         {
+            LOGB("ADC%lu Calibration Timeout (CR=0x%08lX, ISR=0x%08lX)", channel + 1U, adc->CR, adc->ISR);
             return;
         }
+    }
+
+    // Clear ADRDY bit if already set before enabling ADC
+    if (adc->ISR & ADC_ISR_ADRDY)
+    {
+        adc->ISR |= ADC_ISR_ADRDY;
     }
 
     // Enable ADC
@@ -150,11 +182,20 @@ static void ADCService_CommonInit(
     wait_start = HAL_GetTick();
     while (!(adc->ISR & ADC_ISR_ADRDY))
     {
-        if ((HAL_GetTick() - wait_start) > 10U)
+        // Re-issue ADEN if not set
+        if (!(adc->CR & ADC_CR_ADEN))
         {
+            adc->CR |= ADC_CR_ADEN;
+        }
+
+        if ((HAL_GetTick() - wait_start) > 20U)
+        {
+            LOGB("ADC%lu Enable ADRDY Timeout (CR=0x%08lX, ISR=0x%08lX)", channel + 1U, adc->CR, adc->ISR);
             return;
         }
     }
+    // Clear ADRDY flag after acknowledging it is ready
+    adc->ISR |= ADC_ISR_ADRDY;
 
     // Configure Rank 1 for channel, L=0 (1 conversion)
     adc->SQR1 = (channel << ADC_SQR1_SQ1_Pos) | (0U << ADC_SQR1_L_Pos);

@@ -21,17 +21,20 @@
 
 #ifdef SIMULATION_MODE
 #define TRANSMITTER_SIMULATION_DELAY          1000U
-/* Biên độ nhiễu (đơn vị LSB DAC). Tăng để tăng mức nhiễu trên tín hiệu phát */
-#define TRANSMITTER_SIMULATION_NOISE_AMPLITUDE 400.0f
 /* Giá trị tối đa DAC 12-bit */
 #define TRANSMITTER_DAC_MAX_VALUE             4095.0f
+
+#ifdef SIMULATION_NOISE
+/* Biên độ nhiễu (đơn vị LSB DAC). Tăng để tăng mức nhiễu trên tín hiệu phát */
+#define TRANSMITTER_SIMULATION_NOISE_AMPLITUDE 400.0f
 /* Hằng số LCG (Knuth / Numerical Recipes) */
 #define TRANSMITTER_LCG_MULTIPLIER            1664525UL
 #define TRANSMITTER_LCG_INCREMENT             1013904223UL
 #define TRANSMITTER_LCG_SEED                  0x12345678U
 /* 2^31: dùng chuẩn hoá output LCG 31-bit về [0, 1] */
 #define TRANSMITTER_LCG_NORM                  2147483648.0f
-#endif
+#endif /* SIMULATION_NOISE */
+#endif /* SIMULATION_MODE */
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846f
@@ -45,7 +48,7 @@ static uint16_t transmitter_lfm_waveform[TRANSMITTER_LFM_LENGTH];
 static volatile uint16_t transmitter_samples[TRANSMITTER_SAMPLE_COUNT]
     __attribute__((aligned(32)));
 
-#ifdef SIMULATION_MODE
+#if defined(SIMULATION_MODE) && defined(SIMULATION_NOISE)
 /* ---------------------------------------------------------------
  * Bộ tạo số ngẫu nhiên giả (LCG – Linear Congruential Generator)
  * Tham số: Knuth / Numerical Recipes
@@ -75,7 +78,7 @@ static float Transmitter_RandGaussian(void)
     /* CLT: E[sum]=6, Var[sum]=1  →  sum - 6 ~ N(0,1) */
     return sum - (float)(TRANSMITTER_NOISE_CLT_N / 2U);
 }
-#endif /* SIMULATION_MODE */
+#endif /* SIMULATION_MODE && SIMULATION_NOISE */
 
 static void Transmitter_GenerateSingleWaveform(void)
 {
@@ -140,6 +143,7 @@ void Transmitter_SetPulseType(Transmitter_PulseType pulse_type)
     if (src != NULL)
     {
 #ifdef SIMULATION_MODE
+#ifdef SIMULATION_NOISE
         /* Điền toàn bộ buffer: nhiễu Gaussian trên nền BIAS, xung được cộng thêm vào
          * vùng [DELAY, DELAY + active_length). Phản ánh đúng thực tế: nhiễu môi trường
          * luôn hiện diện trên toàn bộ cửa sổ thời gian, không chỉ riêng vùng xung. */
@@ -164,6 +168,21 @@ void Transmitter_SetPulseType(Transmitter_PulseType pulse_type)
             if (noisy > TRANSMITTER_DAC_MAX_VALUE)   { noisy = TRANSMITTER_DAC_MAX_VALUE; }
             transmitter_samples[n] = (uint16_t)lroundf(noisy);
         }
+#else
+        /* Giả lập không nhiễu: đặt xung tại vị trí DELAY trên nền BIAS tĩnh */
+        for (uint32_t n = 0U; n < TRANSMITTER_SAMPLE_COUNT; n++)
+        {
+            if ((n >= TRANSMITTER_SIMULATION_DELAY) &&
+                (n < (TRANSMITTER_SIMULATION_DELAY + active_length)))
+            {
+                transmitter_samples[n] = src[n - TRANSMITTER_SIMULATION_DELAY];
+            }
+            else
+            {
+                transmitter_samples[n] = TRANSMITTER_BIAS;
+            }
+        }
+#endif /* SIMULATION_NOISE */
 #else
         /* Chép phần tín hiệu xung ngắn */
         (void)memcpy((void *)transmitter_samples, src, active_length * sizeof(uint16_t));
@@ -197,7 +216,7 @@ uint32_t Transmitter_GetActiveWaveform(const uint16_t **waveform)
     }
 }
 
-#ifdef SIMULATION_MODE
+#if defined(SIMULATION_MODE) && defined(SIMULATION_NOISE)
 /* Số frame DMA đã xử lý ở lần cuối refill nhiễu */
 static uint32_t transmitter_last_dac_count = 0U;
 
@@ -234,17 +253,17 @@ static void Transmitter_RefillNoise(void)
         transmitter_samples[n] = (uint16_t)lroundf(noisy);
     }
 }
-#endif /* SIMULATION_MODE */
+#endif /* SIMULATION_MODE && SIMULATION_NOISE */
 
 /**
  * Gọi từ main loop.
- * Trong SIMULATION_MODE: cập nhật nhiễu mỗi khi DMA hoàn thành một frame,
+ * Trong SIMULATION_MODE kèm SIMULATION_NOISE: cập nhật nhiễu mỗi khi DMA hoàn thành một frame,
  * giúp nhiễu thay đổi theo thời gian thực thay vì bị đóng băng.
- * Ngoài SIMULATION_MODE: hàm rỗng, không tốn tài nguyên.
+ * Ngoài SIMULATION_NOISE: hàm rỗng, không tốn tài nguyên.
  */
 void Transmitter_Process(void)
 {
-#ifdef SIMULATION_MODE
+#if defined(SIMULATION_MODE) && defined(SIMULATION_NOISE)
     uint32_t current_count = DACService_GetCompletedCount();
     if (current_count != transmitter_last_dac_count)
     {
