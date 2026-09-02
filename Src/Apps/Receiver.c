@@ -345,7 +345,7 @@ void Receiver_BPF(const int16_t *input, int16_t *output)
         int32_t y2_0 = acc2_0 >> 14;
         s2_x2 = s2_x1; s2_x1 = y1_0;
         s2_y2 = s2_y1; s2_y1 = y2_0;
-        output[n] = (int16_t)__USAT(y2_0 + ADC_BIAS, 12U);
+        output[n] = (int16_t)__SSAT(y2_0, 16U);
 
         /* ===== Mẫu 2 (n + 1) ===== */
         int32_t x0_1 = (int32_t)input[n + 1U] - ADC_BIAS;
@@ -367,7 +367,7 @@ void Receiver_BPF(const int16_t *input, int16_t *output)
         int32_t y2_1 = acc2_1 >> 14;
         s2_x2 = s2_x1; s2_x1 = y1_1;
         s2_y2 = s2_y1; s2_y1 = y2_1;
-        output[n + 1U] = (int16_t)__USAT(y2_1 + ADC_BIAS, 12U);
+        output[n + 1U] = (int16_t)__SSAT(y2_1, 16U);
 
         /* ===== Mẫu 3 (n + 2) ===== */
         int32_t x0_2 = (int32_t)input[n + 2U] - ADC_BIAS;
@@ -389,7 +389,7 @@ void Receiver_BPF(const int16_t *input, int16_t *output)
         int32_t y2_2 = acc2_2 >> 14;
         s2_x2 = s2_x1; s2_x1 = y1_2;
         s2_y2 = s2_y1; s2_y1 = y2_2;
-        output[n + 2U] = (int16_t)__USAT(y2_2 + ADC_BIAS, 12U);
+        output[n + 2U] = (int16_t)__SSAT(y2_2, 16U);
 
         /* ===== Mẫu 4 (n + 3) ===== */
         int32_t x0_3 = (int32_t)input[n + 3U] - ADC_BIAS;
@@ -411,7 +411,7 @@ void Receiver_BPF(const int16_t *input, int16_t *output)
         int32_t y2_3 = acc2_3 >> 14;
         s2_x2 = s2_x1; s2_x1 = y1_3;
         s2_y2 = s2_y1; s2_y1 = y2_3;
-        output[n + 3U] = (int16_t)__USAT(y2_3 + ADC_BIAS, 12U);
+        output[n + 3U] = (int16_t)__SSAT(y2_3, 16U);
     }
 
     st[0] = s1_x1; st[1] = s1_x2; st[2] = s1_y1; st[3] = s1_y2;
@@ -507,7 +507,7 @@ void Receiver_IQDemodulator(const int16_t *input, Complex_q31 *iq_output, int16_
     uint32_t lut_idx = 0U;
     for (uint32_t n = 0U; n < ADC_FRAME_SAMPLE_COUNT; n++)
     {
-        int32_t x = (int32_t)input[n] - ADC_BIAS;
+        int32_t x = (int32_t)input[n];
         int32_t cos_val = (int32_t)cos_carrier_lut_q15[lut_idx];
         int32_t sin_val = (int32_t)sin_carrier_lut_q15[lut_idx];
 
@@ -544,8 +544,7 @@ void Receiver_IQDemodulator(const int16_t *input, Complex_q31 *iq_output, int16_
             float fi = (float)lpf_i[n];
             float fq = (float)lpf_q[n];
             int32_t env = (int32_t)sqrtf(fi * fi + fq * fq);
-            int32_t result = env + ADC_BIAS;
-            mag_output[n] = (int16_t)__USAT(result, 12U);
+            mag_output[n] = (int16_t)__USAT(env, 12U);
         }
     }
 }
@@ -600,8 +599,7 @@ void Receiver_DownSampling(const Complex_q31 *input, Complex_q31 *output, int16_
             float fi = (float)avg_i;
             float fq = (float)avg_q;
             int32_t env = (int32_t)sqrtf(fi * fi + fq * fq);
-            int32_t result = env + ADC_BIAS;
-            mag_output[i] = (int16_t)__USAT(result, 12U);
+            mag_output[i] = (int16_t)__USAT(env, 12U);
         }
     }
 }
@@ -710,8 +708,7 @@ void Receiver_MatchedFilter(const Complex_q31 *input, Complex_q31 *output, int16
         if (mag_output != NULL)
         {
             int32_t env = (int32_t)lroundf(sqrtf(out_r_f * out_r_f + out_i_f * out_i_f));
-            int32_t result = env + ADC_BIAS;
-            mag_output[n] = (int16_t)(uint16_t)__USAT(result, 16U);
+            mag_output[n] = (int16_t)(uint16_t)__USAT(env, 16U);
         }
     }
 }
@@ -816,8 +813,7 @@ void Receiver_MatchedFilterFFT(const Complex_q31 *input, Complex_q31 *output, in
         if (mag_output != NULL)
         {
             int32_t env = (int32_t)lroundf(sqrtf(out_r_f * out_r_f + out_i_f * out_i_f));
-            int32_t result = env + ADC_BIAS;
-            mag_output[n] = (int16_t)(uint16_t)__USAT(result, 16U);
+            mag_output[n] = (int16_t)(uint16_t)__USAT(env, 16U);
         }
     }
 }
@@ -872,12 +868,13 @@ static void Receiver_SendFrame(int16_t *const raw_buffers[2],
     }
     else if (rx_select == 3U)
     {
-        // Rx Diff = (Rx1 - Rx2) / 2 + ADC_BIAS
+        // Rx Diff = (Rx1 - Rx2) / 2 (+ ADC_BIAS neu o RAW mode)
+        int32_t bias = (mode == COMMGR_STREAM_RAW) ? ADC_BIAS : 0;
         const int16_t *b1 = active_buffers[0];
         const int16_t *b2 = active_buffers[1];
         for (uint32_t i = 0U; i < sample_count; i++)
         {
-            calc_buf[i] = (int16_t)(((int32_t)b1[i] - (int32_t)b2[i]) / 2 + ADC_BIAS);
+            calc_buf[i] = (int16_t)(((int32_t)b1[i] - (int32_t)b2[i]) / 2 + bias);
         }
         send_buf = calc_buf;
     }
