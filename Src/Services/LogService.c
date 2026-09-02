@@ -100,7 +100,15 @@ void LogService_Log(LogLevel_t level, const char *file, uint32_t line, const cha
 {
     char log_buffer[LOG_MAX_BUFFER_SIZE];
     uint64_t stamp_us = LogService_GetTimestampUs();
-    const char *tag = (level == LOG_LEVEL_DEV) ? "LOGD" : "LOGP";
+    const char *tag = "LOGP";
+    if (level == LOG_LEVEL_DEV)
+    {
+        tag = "LOGD";
+    }
+    else if (level == LOG_LEVEL_BUG)
+    {
+        tag = "LOGB";
+    }
     const char *short_file = LogService_GetFileName(file);
 
     // Ghép prefix [stamp][tag][file:line] nhanh chóng bằng thao tác con trỏ chuỗi
