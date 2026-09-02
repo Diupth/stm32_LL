@@ -6,6 +6,8 @@
 #include "Receiver.h"
 #include "Transmitter.h"
 #include "SyncSignalApp.h"
+#include "ADCService.h"
+#include "DACService.h"
 #include <string.h>
 
 void Error_Handler(void);

@@ -28,9 +28,15 @@ bool SyncSignalApp_WaitForFrames(void) {
     return false;
   }
 
-  /* Khi có ít nhất 1 kênh sẵn sàng, đợi kênh còn lại để đảm bảo đồng bộ 2 kênh */
+  /* Khi có ít nhất 1 kênh sẵn sàng, đợi kênh còn lại để đảm bảo đồng bộ 2 kênh.
+   * Timeout 5 ms (~3 chu kỳ frame @ 96 kHz / 2048 mẫu) để tránh treo hệ thống
+   * khi một kênh ADC bị lỗi DMA hoặc không nhận được ngắt. */
+  uint32_t wait_start = HAL_GetTick();
   while (!ADCService_HasFrame(1U) || !ADCService_HasFrame(2U)) {
     ComMgr_Process();
+    if ((HAL_GetTick() - wait_start) >= 5U) {
+      return false;
+    }
   }
 
   return true;

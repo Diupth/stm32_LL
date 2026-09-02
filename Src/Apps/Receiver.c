@@ -10,6 +10,7 @@
 #include "SyncSignalApp.h"
 #ifdef SHOW_TIMING_LOG
 #include "DWTService.h"
+#include "LogService.h"
 #endif
 
 #define RECEIVER_FRAME_HEADER_SIZE 16U
@@ -89,29 +90,18 @@ static uint32_t total_cycles = 0U;
 
 static void Receiver_SendTimingLog(void)
 {
-    uint8_t dsp_frame[40] = {'D', 'S', 'P', '1'};
+    uint32_t seq = dsp_log_sequence++;
+    uint32_t total_us = DWTService_CyclesToUs(total_cycles);
+    uint32_t read_us = DWTService_CyclesToUs(read_cycles);
+    uint32_t bpf_us = DWTService_CyclesToUs(bpf_cycles);
+    uint32_t demod_us = DWTService_CyclesToUs(demod_cycles);
+    uint32_t mfilt_us = DWTService_CyclesToUs(mfilt_cycles);
+    uint32_t send_us = DWTService_CyclesToUs(send_cycles);
+    uint32_t ds_us = DWTService_CyclesToUs(ds_cycles);
+    uint32_t rd_us = DWTService_CyclesToUs(last_rd_cycles);
 
-    uint32_t values[9] = {
-        dsp_log_sequence++,
-        DWTService_CyclesToUs(total_cycles),
-        DWTService_CyclesToUs(read_cycles),
-        DWTService_CyclesToUs(bpf_cycles),
-        DWTService_CyclesToUs(demod_cycles),
-        DWTService_CyclesToUs(mfilt_cycles),
-        DWTService_CyclesToUs(send_cycles),
-        DWTService_CyclesToUs(ds_cycles),
-        DWTService_CyclesToUs(last_rd_cycles)
-    };
-
-    for (uint32_t i = 0U; i < 9U; i++)
-    {
-        for (uint32_t byte = 0U; byte < 4U; byte++)
-        {
-            dsp_frame[4U + i * 4U + byte] = (uint8_t)(values[i] >> (byte * 8U));
-        }
-    }
-
-    ComMgr_SendData(dsp_frame, sizeof(dsp_frame));
+    LOGD("DSP Timing [#%lu]: \ntotal=%luus \nread=%lu, \nbpf=%lu, \ndemod=%lu, \nds=%lu, \nmfilt=%lu, \nrd=%lu, \nsend=%lu",
+         seq, total_us, read_us, bpf_us, demod_us, ds_us, mfilt_us, rd_us, send_us);
 }
 #endif
 
